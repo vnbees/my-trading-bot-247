@@ -112,13 +112,13 @@ class TrendBot {
           this.currentPosition = null;
         }
 
+        // Monitor position hiện tại (nếu có)
         if (this.currentPosition && this.currentPosition.isActive) {
-          // Monitor position hiện tại
           await this.monitorPosition();
-        } else {
-          // Tìm cơ hội vào lệnh mới
-          await this.checkEntrySignals();
         }
+
+        // Luôn check entry signals để vào lệnh mới (dù có position hay không)
+        await this.checkEntrySignals();
       } catch (err) {
         console.error(`[TREND] ❌ Lỗi trong main loop: ${err.message}`);
         if (err.stack && err.message.length < 200) {
