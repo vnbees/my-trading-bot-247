@@ -398,7 +398,8 @@ class TrendBot {
 
     // 1. EMA 12 cắt lên trên EMA 26 (crossover)
     // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
-    const emaCrossover = emaFastPrev < emaSlowPrev && emaFastCurr > emaSlowCurr;
+    // Chấp nhận cả trường hợp bằng nhau (<=) rồi mới lớn hơn (>)
+    const emaCrossover = emaFastPrev <= emaSlowPrev && emaFastCurr > emaSlowCurr;
 
     // 2. RSI > 50 (lọc tín hiệu giả)
     const rsiFilter = indicators.rsi > this.config.rsiThreshold;
@@ -427,7 +428,8 @@ class TrendBot {
 
     // 1. EMA 12 cắt xuống dưới EMA 26 (crossover)
     // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
-    const emaCrossover = emaFastPrev > emaSlowPrev && emaFastCurr < emaSlowCurr;
+    // Chấp nhận cả trường hợp bằng nhau (>=) rồi mới nhỏ hơn (<)
+    const emaCrossover = emaFastPrev >= emaSlowPrev && emaFastCurr < emaSlowCurr;
 
     // 2. RSI < 50 (lọc tín hiệu giả)
     const rsiFilter = indicators.rsi < this.config.rsiThreshold;
