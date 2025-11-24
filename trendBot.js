@@ -199,36 +199,43 @@ class TrendBot {
       const candles = await this.fetchCandles(this.config.symbol, this.config.timeFrame, 200);
       const { highs, lows, closes, opens } = this.parseCandles(candles);
 
+      // Loại bỏ nến cuối cùng (nến đang chạy, chưa đóng) để chỉ dùng nến đã đóng
+      // Binance thường trả về nến cuối cùng là nến đang chạy
+      const closedHighs = highs.slice(0, -1);
+      const closedLows = lows.slice(0, -1);
+      const closedCloses = closes.slice(0, -1);
+      const closedOpens = opens.slice(0, -1);
+
       const maxPeriod = Math.max(this.config.emaFast, this.config.emaSlow, this.config.rsiPeriod);
-      if (highs.length < maxPeriod + 10) {
-        throw new Error(`Không đủ dữ liệu để tính chỉ báo (cần ít nhất ${maxPeriod + 10}, có ${highs.length})`);
+      if (closedHighs.length < maxPeriod + 10) {
+        throw new Error(`Không đủ dữ liệu để tính chỉ báo (cần ít nhất ${maxPeriod + 10}, có ${closedHighs.length})`);
       }
 
-      // Tính EMA Fast (12)
+      // Tính EMA Fast (12) - chỉ dùng nến đã đóng
       const emaFastInput = {
-        values: closes,
+        values: closedCloses,
         period: this.config.emaFast,
       };
       const emaFastResult = EMA.calculate(emaFastInput);
       const latestEMAFast = emaFastResult[emaFastResult.length - 1];
 
-      // Tính EMA Slow (26)
+      // Tính EMA Slow (26) - chỉ dùng nến đã đóng
       const emaSlowInput = {
-        values: closes,
+        values: closedCloses,
         period: this.config.emaSlow,
       };
       const emaSlowResult = EMA.calculate(emaSlowInput);
       const latestEMASlow = emaSlowResult[emaSlowResult.length - 1];
 
-      // Tính RSI
+      // Tính RSI - chỉ dùng nến đã đóng
       const rsiInput = {
-        values: closes,
+        values: closedCloses,
         period: this.config.rsiPeriod,
       };
       const rsiResult = RSI.calculate(rsiInput);
       const latestRSI = rsiResult[rsiResult.length - 1];
 
-      // Lưu lịch sử EMA để detect crossover (lấy 3 giá trị gần nhất)
+      // Lưu lịch sử EMA để detect crossover (lấy 3 giá trị gần nhất từ nến đã đóng)
       this.emaFastHistory = emaFastResult.slice(-3);
       this.emaSlowHistory = emaSlowResult.slice(-3);
 
@@ -236,10 +243,10 @@ class TrendBot {
         emaFast: latestEMAFast || 0,
         emaSlow: latestEMASlow || 0,
         rsi: latestRSI || 50,
-        currentPrice: closes[closes.length - 1],
+        currentPrice: closes[closes.length - 1], // Giá hiện tại từ nến đang chạy
         emaFastHistory: this.emaFastHistory,
         emaSlowHistory: this.emaSlowHistory,
-        // Trả về dữ liệu nến để tính SL
+        // Trả về dữ liệu nến để tính SL (bao gồm cả nến đang chạy để có đủ dữ liệu)
         highs,
         lows,
         closes,
