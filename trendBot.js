@@ -15,8 +15,10 @@ const { EMA, RSI } = require('technicalindicators');
  * Logic:
  * - Sử dụng EMA 12/26 để xác định xu hướng (crossover)
  * - Sử dụng RSI 14 để lọc tín hiệu giả (ngưỡng 50)
+ * - SL = đáy gần nhất (LONG) hoặc đỉnh gần nhất (SHORT)
+ * - TP = R:R ratio 1:2 từ SL
  * - Chỉ mở 1 vị thế tại một thời điểm (LONG hoặc SHORT)
- * - Thoát lệnh khi EMA cắt ngược
+ * - Thoát lệnh khi đạt SL/TP (exchange tự động xử lý)
  */
 class TrendBot {
   constructor({ apiClient, config }) {
@@ -28,16 +30,18 @@ class TrendBot {
       leverage: 10, // Leverage mặc định
       
       // Indicator Parameters
-      timeFrame: '1m',
+      timeFrame: '5m',
       emaFast: 12,
       emaSlow: 26,
       rsiPeriod: 14,
       rsiThreshold: 50,
+      slLookbackPeriod: 20, // Số nến để tìm đáy/đỉnh gần nhất cho SL
+      rRatio: 2, // Risk:Reward = 1:2
       
       // Technical
       priceTickSize: 0,
       sizeStep: 0,
-      pollIntervalMs: 60 * 1000, // Check mỗi phút (1m)
+      pollIntervalMs: 5 * 60 * 1000, // Check mỗi 5 phút (5m)
       
       ...config,
     };
@@ -46,7 +50,7 @@ class TrendBot {
     this.sizeStep = this.config.sizeStep > 0 ? this.config.sizeStep : null;
     this.marketInfoLoaded = false;
     this.priceDecimals = this.priceTick ? getDecimalsFromStep(this.priceTick) : 4;
-    this.currentPosition = null; // { direction, entryPrice, size, orderId, isActive }
+    this.currentPosition = null; // { direction, entryPrice, sl, tp, size, orderId, isActive }
     this.emaFastHistory = []; // Lưu lịch sử EMA 12 để detect crossover
     this.emaSlowHistory = []; // Lưu lịch sử EMA 26 để detect crossover
     this.minLotSize = null; // Sẽ được set trong prepareMarketMeta
@@ -67,6 +71,8 @@ class TrendBot {
       'EMA Slow': this.config.emaSlow,
       'RSI Period': this.config.rsiPeriod,
       'RSI Threshold': this.config.rsiThreshold,
+      'SL Lookback': this.config.slLookbackPeriod,
+      'R:R Ratio': `1:${this.config.rRatio}`,
     });
 
     await this.prepareMarketMeta();
@@ -78,6 +84,8 @@ class TrendBot {
     if (existingPosition) {
       console.log(`[TREND] ✅ Phát hiện position đang mở: ${existingPosition.direction.toUpperCase()}`);
       console.log(`  - Entry: ${formatNumber(existingPosition.entryPrice)}`);
+      console.log(`  - SL: ${existingPosition.sl ? formatNumber(existingPosition.sl) : 'N/A'}`);
+      console.log(`  - TP: ${existingPosition.tp ? formatNumber(existingPosition.tp) : 'N/A'}`);
       console.log(`  - Size: ${formatNumber(existingPosition.size)}`);
       this.currentPosition = existingPosition;
     } else {
@@ -231,11 +239,80 @@ class TrendBot {
         currentPrice: closes[closes.length - 1],
         emaFastHistory: this.emaFastHistory,
         emaSlowHistory: this.emaSlowHistory,
+        // Trả về dữ liệu nến để tính SL
+        highs,
+        lows,
+        closes,
       };
     } catch (err) {
       console.error(`[TREND] ❌ Lỗi khi tính chỉ báo: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Tính điểm dừng lỗ (Stop Loss) dựa trên đáy/đỉnh gần nhất
+   * LONG: SL = đáy gần nhất (lowest low)
+   * SHORT: SL = đỉnh gần nhất (highest high)
+   */
+  calculateStopLoss(entryPrice, lows, highs, direction) {
+    if (!entryPrice || entryPrice <= 0) {
+      throw new Error('Entry price không hợp lệ');
+    }
+
+    if (!lows || !highs || lows.length === 0 || highs.length === 0) {
+      throw new Error('Dữ liệu nến không hợp lệ');
+    }
+
+    // Lấy số nến gần nhất để tìm đáy/đỉnh
+    const lookback = Math.min(this.config.slLookbackPeriod, lows.length);
+    const recentLows = lows.slice(-lookback);
+    const recentHighs = highs.slice(-lookback);
+
+    let sl;
+
+    if (direction === 'long') {
+      // LONG: Tìm đáy thấp nhất trong khoảng thời gian gần đây
+      const lowestLow = Math.min(...recentLows);
+      sl = lowestLow;
+    } else {
+      // SHORT: Tìm đỉnh cao nhất trong khoảng thời gian gần đây
+      const highestHigh = Math.max(...recentHighs);
+      sl = highestHigh;
+    }
+
+    // Round theo priceTick
+    if (this.priceTick && this.priceTick > 0) {
+      sl = roundToTick(sl, this.priceTick);
+    }
+
+    return Number(sl.toFixed(this.priceDecimals));
+  }
+
+  /**
+   * Tính điểm chốt lời (Take Profit) dựa trên R:R ratio
+   */
+  calculateTakeProfit(entryPrice, stopLoss, direction) {
+    if (!entryPrice || !stopLoss || entryPrice <= 0 || stopLoss <= 0) {
+      throw new Error('Entry price hoặc Stop Loss không hợp lệ');
+    }
+
+    const slDistance = Math.abs(entryPrice - stopLoss);
+    const tpDistance = slDistance * this.config.rRatio;
+
+    let tp;
+    if (direction === 'long') {
+      tp = entryPrice + tpDistance;
+    } else {
+      tp = entryPrice - tpDistance;
+    }
+
+    // Round theo priceTick
+    if (this.priceTick && this.priceTick > 0) {
+      tp = roundToTick(tp, this.priceTick);
+    }
+
+    return Number(tp.toFixed(this.priceDecimals));
   }
 
   /**
@@ -317,8 +394,8 @@ class TrendBot {
     const emaSlowCurr = indicators.emaSlow;
 
     // 1. EMA 12 cắt lên trên EMA 26 (crossover)
-    // Kiểm tra: EMA 12 trước <= EMA 26 trước VÀ EMA 12 hiện tại > EMA 26 hiện tại
-    const emaCrossover = emaFastPrev <= emaSlowPrev && emaFastCurr > emaSlowCurr;
+    // Kiểm tra: EMA 12 trước < EMA 26 trước VÀ EMA 12 hiện tại > EMA 26 hiện tại
+    const emaCrossover = emaFastPrev < emaSlowPrev && emaFastCurr > emaSlowCurr;
 
     // 2. RSI > 50 (lọc tín hiệu giả)
     const rsiFilter = indicators.rsi > this.config.rsiThreshold;
@@ -343,8 +420,8 @@ class TrendBot {
     const emaSlowCurr = indicators.emaSlow;
 
     // 1. EMA 12 cắt xuống dưới EMA 26 (crossover)
-    // Kiểm tra: EMA 12 trước >= EMA 26 trước VÀ EMA 12 hiện tại < EMA 26 hiện tại
-    const emaCrossover = emaFastPrev >= emaSlowPrev && emaFastCurr < emaSlowCurr;
+    // Kiểm tra: EMA 12 trước > EMA 26 trước VÀ EMA 12 hiện tại < EMA 26 hiện tại
+    const emaCrossover = emaFastPrev > emaSlowPrev && emaFastCurr < emaSlowCurr;
 
     // 2. RSI < 50 (lọc tín hiệu giả)
     const rsiFilter = indicators.rsi < this.config.rsiThreshold;
@@ -352,29 +429,6 @@ class TrendBot {
     return emaCrossover && rsiFilter;
   }
 
-  /**
-   * Kiểm tra tín hiệu thoát lệnh (EMA crossover ngược)
-   */
-  checkEMAExit(indicators, direction) {
-    // Kiểm tra có đủ dữ liệu EMA history
-    if (!indicators.emaFastHistory || !indicators.emaSlowHistory || 
-        indicators.emaFastHistory.length < 2 || indicators.emaSlowHistory.length < 2) {
-      return false;
-    }
-
-    const emaFastPrev = indicators.emaFastHistory[indicators.emaFastHistory.length - 2];
-    const emaSlowPrev = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 2];
-    const emaFastCurr = indicators.emaFast;
-    const emaSlowCurr = indicators.emaSlow;
-
-    if (direction === 'long') {
-      // LONG: Thoát khi EMA 12 cắt xuống dưới EMA 26
-      return emaFastPrev > emaSlowPrev && emaFastCurr <= emaSlowCurr;
-    } else {
-      // SHORT: Thoát khi EMA 12 cắt lên trên EMA 26
-      return emaFastPrev < emaSlowPrev && emaFastCurr >= emaSlowCurr;
-    }
-  }
 
 
   /**
@@ -391,30 +445,6 @@ class TrendBot {
     // Kiểm tra LONG entry
     if (this.checkLongEntry(indicators)) {
       console.log('[TREND] ✅ Tín hiệu LONG: EMA12 cắt lên EMA26, RSI > 50');
-      
-      // Verify position từ API trước
-      const apiPosition = await this.getCurrentPosition();
-      
-      // Đóng lệnh cũ nếu có (bất kể chiều nào, vì chỉ mở 1 lệnh tại một thời điểm)
-      if (apiPosition && apiPosition.isActive) {
-        console.log(`[TREND] 🔄 Đóng lệnh ${apiPosition.direction.toUpperCase()} cũ trước khi mở LONG mới`);
-        await this.closePosition();
-        // Đợi và verify lại cho đến khi position đã đóng hoàn toàn
-        let retries = 0;
-        while (retries < 5) {
-          await sleep(1000);
-          const verifyPosition = await this.getCurrentPosition();
-          if (!verifyPosition || !verifyPosition.isActive) {
-            console.log('[TREND] ✅ Đã đóng position cũ thành công');
-            break;
-          }
-          retries++;
-          if (retries >= 5) {
-            console.warn('[TREND] ⚠️ Position cũ vẫn chưa đóng sau 5 lần thử, tiếp tục mở lệnh mới');
-          }
-        }
-      }
-      
       await this.enterPosition('long', indicators);
       return;
     }
@@ -422,30 +452,6 @@ class TrendBot {
     // Kiểm tra SHORT entry
     if (this.checkShortEntry(indicators)) {
       console.log('[TREND] ✅ Tín hiệu SHORT: EMA12 cắt xuống EMA26, RSI < 50');
-      
-      // Verify position từ API trước
-      const apiPosition = await this.getCurrentPosition();
-      
-      // Đóng lệnh cũ nếu có (bất kể chiều nào, vì chỉ mở 1 lệnh tại một thời điểm)
-      if (apiPosition && apiPosition.isActive) {
-        console.log(`[TREND] 🔄 Đóng lệnh ${apiPosition.direction.toUpperCase()} cũ trước khi mở SHORT mới`);
-        await this.closePosition();
-        // Đợi và verify lại cho đến khi position đã đóng hoàn toàn
-        let retries = 0;
-        while (retries < 5) {
-          await sleep(1000);
-          const verifyPosition = await this.getCurrentPosition();
-          if (!verifyPosition || !verifyPosition.isActive) {
-            console.log('[TREND] ✅ Đã đóng position cũ thành công');
-            break;
-          }
-          retries++;
-          if (retries >= 5) {
-            console.warn('[TREND] ⚠️ Position cũ vẫn chưa đóng sau 5 lần thử, tiếp tục mở lệnh mới');
-          }
-        }
-      }
-      
       await this.enterPosition('short', indicators);
       return;
     }
@@ -471,6 +477,17 @@ class TrendBot {
   async enterPosition(direction, indicators) {
     try {
       const entryPrice = indicators.currentPrice;
+      const { lows, highs } = indicators;
+
+      if (!lows || !highs || lows.length === 0 || highs.length === 0) {
+        throw new Error('Dữ liệu nến không hợp lệ, không thể tính SL');
+      }
+
+      // Tính SL dựa trên đáy/đỉnh gần nhất
+      const stopLoss = this.calculateStopLoss(entryPrice, lows, highs, direction);
+
+      // Tính TP dựa trên R:R ratio
+      const takeProfit = this.calculateTakeProfit(entryPrice, stopLoss, direction);
 
       // Lấy equity (vốn)
       const equity = await this.getEquity();
@@ -480,6 +497,8 @@ class TrendBot {
 
       console.log(`[TREND] 📈 Vào lệnh ${direction.toUpperCase()}:`);
       console.log(`  - Entry: ${formatNumber(entryPrice)}`);
+      console.log(`  - SL: ${formatNumber(stopLoss)} (distance: ${formatNumber(Math.abs(entryPrice - stopLoss))})`);
+      console.log(`  - TP: ${formatNumber(takeProfit)} (distance: ${formatNumber(Math.abs(entryPrice - takeProfit))})`);
       console.log(`  - Lot Size: ${formatNumber(lotSizeResult.size)}`);
       console.log(`  - Capital sử dụng: ${formatNumber(lotSizeResult.actualCapital || lotSizeResult.capital)} ${this.config.marginCoin} (${this.config.capital && this.config.capital > 0 ? `đã chỉ định: ${this.config.capital}` : 'toàn bộ equity'})`);
       console.log(`  - Leverage: ${this.config.leverage}x`);
@@ -498,7 +517,7 @@ class TrendBot {
         throw new Error(`Capital quá thấp! Cần ít nhất ${formatNumber(lotSizeResult.minCapitalRequired)} ${this.config.marginCoin} để mở lệnh với leverage ${this.config.leverage}x. Hiện tại: ${formatNumber(lotSizeResult.capital)} ${this.config.marginCoin}`);
       }
 
-      // Mở position (không set SL/TP)
+      // Mở position với SL/TP
       const side = direction === 'long' ? 'open_long' : 'open_short';
       await this.api.placeOrder({
         symbol: this.config.symbol,
@@ -506,6 +525,8 @@ class TrendBot {
         size: lotSizeResult.size.toString(),
         side,
         orderType: 'market',
+        presetStopLossPrice: stopLoss.toString(),
+        presetTakeProfitPrice: takeProfit.toString(),
       });
 
       console.log(`[TREND] ✅ Đã mở position ${direction.toUpperCase()} thành công`);
@@ -514,8 +535,8 @@ class TrendBot {
       this.currentPosition = {
         direction,
         entryPrice,
-        sl: null,
-        tp: null,
+        sl: stopLoss,
+        tp: takeProfit,
         size: lotSizeResult.size,
         isActive: true,
         orderId: null,
@@ -536,21 +557,54 @@ class TrendBot {
   }
 
   /**
-   * Tính thời gian đến nến 1m tiếp theo (tính bằng milliseconds)
-   * Ví dụ: Nếu hiện tại là 10:00:30, nến tiếp theo là 10:01:00 → trả về 30000ms
+   * Tính thời gian đến nến tiếp theo dựa trên timeframe (tính bằng milliseconds)
+   * Ví dụ: 5m → Nếu hiện tại là 10:03:30, nến tiếp theo là 10:05:00 → trả về 90000ms
    */
   getTimeUntilNextCandle() {
     const now = new Date();
     const currentSeconds = now.getSeconds();
     const currentMilliseconds = now.getMilliseconds();
     
-    // Tính thời gian đến phút tiếp theo (làm tròn lên)
-    // Nếu đang ở giây 30, đợi 30 giây đến phút tiếp theo
-    const secondsUntilNextMinute = 60 - currentSeconds;
-    const millisecondsUntilNextMinute = (secondsUntilNextMinute * 1000) - currentMilliseconds;
+    // Parse timeframe (1m, 5m, 15m, etc.)
+    const timeframeMatch = this.config.timeFrame.match(/^(\d+)([mhd])$/i);
+    if (!timeframeMatch) {
+      // Fallback: mặc định 5 phút
+      const minutes = 5;
+      const currentMinutes = now.getMinutes();
+      const minutesUntilNext = minutes - (currentMinutes % minutes);
+      const secondsUntilNext = (minutesUntilNext * 60) - currentSeconds;
+      return Math.max((secondsUntilNext * 1000) - currentMilliseconds, 100);
+    }
+    
+    const interval = parseInt(timeframeMatch[1]);
+    const unit = timeframeMatch[2].toLowerCase();
+    
+    let secondsUntilNext = 0;
+    
+    if (unit === 'm') {
+      // Minutes
+      const currentMinutes = now.getMinutes();
+      const minutesUntilNext = interval - (currentMinutes % interval);
+      secondsUntilNext = (minutesUntilNext * 60) - currentSeconds;
+    } else if (unit === 'h') {
+      // Hours
+      const currentMinutes = now.getMinutes();
+      const currentSecondsInHour = currentMinutes * 60 + currentSeconds;
+      const intervalSeconds = interval * 3600;
+      secondsUntilNext = intervalSeconds - (currentSecondsInHour % intervalSeconds);
+    } else if (unit === 'd') {
+      // Days
+      const currentHours = now.getHours();
+      const currentMinutes = now.getMinutes();
+      const currentSecondsInDay = currentHours * 3600 + currentMinutes * 60 + currentSeconds;
+      const intervalSeconds = interval * 86400;
+      secondsUntilNext = intervalSeconds - (currentSecondsInDay % intervalSeconds);
+    }
+    
+    const millisecondsUntilNext = (secondsUntilNext * 1000) - currentMilliseconds;
     
     // Đảm bảo ít nhất đợi 100ms để tránh chạy quá sớm
-    return Math.max(millisecondsUntilNextMinute, 100);
+    return Math.max(millisecondsUntilNext, 100);
   }
 
   /**
@@ -578,59 +632,13 @@ class TrendBot {
 
       const { direction, entryPrice } = this.currentPosition;
 
-      // Kiểm tra EMA crossover ngược (exit signal)
-      let shouldClose = false;
-      let closeReason = '';
-
-      if (this.checkEMAExit(indicators, direction)) {
-        shouldClose = true;
-        closeReason = `EMA Crossover ngược (EMA12 ${direction === 'long' ? 'cắt xuống' : 'cắt lên'} EMA26)`;
-      }
-
-      if (shouldClose) {
-        console.log(`[TREND] 🔔 Thoát lệnh: ${closeReason}`);
-        
-        // Kiểm tra xem có tín hiệu vào lệnh mới ngay không
-        const hasLongSignal = this.checkLongEntry(indicators);
-        const hasShortSignal = this.checkShortEntry(indicators);
-        
-        if (hasLongSignal || hasShortSignal) {
-          // Có tín hiệu vào lệnh mới → Đóng lệnh cũ và mở lệnh mới cùng lúc
-          const newDirection = hasLongSignal ? 'long' : 'short';
-          console.log(`[TREND] 🔄 Phát hiện tín hiệu ${newDirection.toUpperCase()} mới, đóng lệnh cũ và mở lệnh mới ngay lập tức`);
-          
-          // Đóng lệnh cũ
-          await this.closePosition();
-          
-          // Đợi và verify lại cho đến khi position đã đóng hoàn toàn
-          let retries = 0;
-          while (retries < 5) {
-            await sleep(1000);
-            const verifyPosition = await this.getCurrentPosition();
-            if (!verifyPosition || !verifyPosition.isActive) {
-              console.log('[TREND] ✅ Đã đóng position cũ thành công');
-              break;
-            }
-            retries++;
-            if (retries >= 5) {
-              console.warn('[TREND] ⚠️ Position cũ vẫn chưa đóng sau 5 lần thử, tiếp tục mở lệnh mới');
-            }
-          }
-          
-          // Mở lệnh mới ngay lập tức
-          await this.enterPosition(newDirection, indicators);
-        } else {
-          // Không có tín hiệu vào lệnh mới → Chỉ đóng lệnh
-          await this.closePosition();
-        }
-      } else {
-        // Log status
+      // Chỉ log status, không đóng lệnh
+      // SL/TP được exchange tự động xử lý
         const pnlPercent = direction === 'long'
           ? ((currentPrice - entryPrice) / entryPrice) * 100
           : ((entryPrice - currentPrice) / entryPrice) * 100;
 
         console.log(`[TREND] 📊 Position ${direction.toUpperCase()}: Entry=${formatNumber(entryPrice)}, Current=${formatNumber(currentPrice)}, PnL=${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
-      }
     } catch (err) {
       console.error(`[TREND] ❌ Lỗi khi monitor position: ${err.message}`);
     }
@@ -657,12 +665,12 @@ class TrendBot {
 
       // Thử đóng bằng closePosition API trước
       try {
-        await this.api.closePosition({
-          symbol: this.config.symbol,
-          marginCoin: this.config.marginCoin,
-          holdSide: direction,
-        });
-        console.log(`[TREND] ✅ Đã đóng position ${direction.toUpperCase()}`);
+      await this.api.closePosition({
+        symbol: this.config.symbol,
+        marginCoin: this.config.marginCoin,
+        holdSide: direction,
+      });
+      console.log(`[TREND] ✅ Đã đóng position ${direction.toUpperCase()}`);
       } catch (closeErr) {
         // Nếu closePosition fail, dùng placeOrder
         console.log(`[TREND] ⚠️ closePosition API fail, dùng placeOrder: ${closeErr.message}`);
@@ -713,8 +721,8 @@ class TrendBot {
           const size = Number(p.total || p.holdSize || p.size || 0);
           return size > 0;
         });
-        if (!position) {
-          return null;
+      if (!position) {
+        return null;
         }
       }
       

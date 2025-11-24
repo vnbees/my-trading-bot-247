@@ -54,7 +54,7 @@ async function main() {
     // Timeframe
     .option('timeFrame', {
       type: 'string',
-      default: process.env.TREND_TIME_FRAME || '1m',
+      default: process.env.TREND_TIME_FRAME || '5m',
       describe: 'Time frame cho tất cả chỉ báo (1m, 5m, 15m, etc.)',
     })
     // EMA Parameters
@@ -79,6 +79,17 @@ async function main() {
       default: Number(process.env.TREND_RSI_THRESHOLD) || 50,
       describe: 'RSI threshold để lọc tín hiệu - Mặc định: 50',
     })
+    // SL/TP Parameters
+    .option('slLookback', {
+      type: 'number',
+      default: Number(process.env.TREND_SL_LOOKBACK) || 20,
+      describe: 'Số nến để tìm đáy/đỉnh gần nhất cho SL - Mặc định: 20',
+    })
+    .option('rRatio', {
+      type: 'number',
+      default: Number(process.env.TREND_R_RATIO) || 2,
+      describe: 'Risk:Reward ratio - Mặc định: 1:2',
+    })
     // Technical
     .option('tick', {
       type: 'number',
@@ -92,8 +103,8 @@ async function main() {
     })
     .option('poll', {
       type: 'number',
-      default: Number(process.env.TREND_POLL_SECONDS) || 60,
-      describe: 'Seconds between checks (mặc định: 60s = 1 phút)',
+      default: Number(process.env.TREND_POLL_SECONDS) || 300,
+      describe: 'Seconds between checks (mặc định: 300s = 5 phút)',
     })
     .help()
     .alias('help', 'h').argv;
@@ -125,6 +136,8 @@ async function main() {
   console.log(`  - Timeframe: ${argv.timeFrame}`);
   console.log(`  - EMA Fast: ${argv.emaFast}, EMA Slow: ${argv.emaSlow}`);
   console.log(`  - RSI Period: ${argv.rsiPeriod}, Threshold: ${argv.rsiThreshold}`);
+  console.log(`  - SL Lookback: ${argv.slLookback} nến (tìm đáy/đỉnh gần nhất)`);
+  console.log(`  - Risk:Reward Ratio: 1:${argv.rRatio}`);
 
   const bot = new TrendBot({
     apiClient,
@@ -144,6 +157,10 @@ async function main() {
       // RSI
       rsiPeriod: argv.rsiPeriod,
       rsiThreshold: argv.rsiThreshold,
+      
+      // SL/TP
+      slLookbackPeriod: argv.slLookback,
+      rRatio: argv.rRatio,
       
       // Technical
       priceTickSize: argv.tick,
