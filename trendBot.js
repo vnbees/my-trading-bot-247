@@ -388,13 +388,16 @@ class TrendBot {
       return false;
     }
 
+    // Chỉ dùng EMA của các nến đã đóng (không dùng nến hiện tại đang chạy)
+    // nến -2 (đã đóng): emaFastPrev, emaSlowPrev
+    // nến -1 (đã đóng, gần nhất): emaFastCurr, emaSlowCurr
     const emaFastPrev = indicators.emaFastHistory[indicators.emaFastHistory.length - 2];
     const emaSlowPrev = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 2];
-    const emaFastCurr = indicators.emaFast;
-    const emaSlowCurr = indicators.emaSlow;
+    const emaFastCurr = indicators.emaFastHistory[indicators.emaFastHistory.length - 1];
+    const emaSlowCurr = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 1];
 
     // 1. EMA 12 cắt lên trên EMA 26 (crossover)
-    // Kiểm tra: EMA 12 trước < EMA 26 trước VÀ EMA 12 hiện tại > EMA 26 hiện tại
+    // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
     const emaCrossover = emaFastPrev < emaSlowPrev && emaFastCurr > emaSlowCurr;
 
     // 2. RSI > 50 (lọc tín hiệu giả)
@@ -414,13 +417,16 @@ class TrendBot {
       return false;
     }
 
+    // Chỉ dùng EMA của các nến đã đóng (không dùng nến hiện tại đang chạy)
+    // nến -2 (đã đóng): emaFastPrev, emaSlowPrev
+    // nến -1 (đã đóng, gần nhất): emaFastCurr, emaSlowCurr
     const emaFastPrev = indicators.emaFastHistory[indicators.emaFastHistory.length - 2];
     const emaSlowPrev = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 2];
-    const emaFastCurr = indicators.emaFast;
-    const emaSlowCurr = indicators.emaSlow;
+    const emaFastCurr = indicators.emaFastHistory[indicators.emaFastHistory.length - 1];
+    const emaSlowCurr = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 1];
 
     // 1. EMA 12 cắt xuống dưới EMA 26 (crossover)
-    // Kiểm tra: EMA 12 trước > EMA 26 trước VÀ EMA 12 hiện tại < EMA 26 hiện tại
+    // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
     const emaCrossover = emaFastPrev > emaSlowPrev && emaFastCurr < emaSlowCurr;
 
     // 2. RSI < 50 (lọc tín hiệu giả)
