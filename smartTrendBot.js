@@ -1,0 +1,905 @@
+const {
+  sleep,
+  formatNumber,
+  percentFormat,
+  roundToTick,
+  roundToStep,
+  getDecimalsFromStep,
+} = require('./utils');
+const axios = require('axios');
+const { EMA, ADX } = require('technicalindicators');
+
+/**
+ * Smart Trend Bot với ADX Crossover + EMA Filter
+ * 
+ * Logic:
+ * - LONG: ADX chéo lên 25, EMA12 > EMA26, TP 1:2, SL = giá thấp nhất trong 50 nến gần nhất
+ * - SHORT: ADX chéo lên 25, EMA12 < EMA26, TP 1:2, SL = giá cao nhất trong 50 nến gần nhất
+ * - Chỉ mở 1 vị thế tại một thời điểm (LONG hoặc SHORT)
+ * - Thoát lệnh khi đạt SL/TP (exchange tự động xử lý)
+ */
+class SmartTrendBot {
+  constructor({ apiClient, config }) {
+    this.api = apiClient;
+    this.config = {
+      symbol: 'BTCUSDT_UMCBL',
+      marginCoin: 'USDT',
+      capital: null, // Số tiền muốn vào lệnh (USDT), null = dùng toàn bộ equity
+      leverage: 10, // Leverage mặc định
+      
+      // Indicator Parameters
+      timeFrame: '5m',
+      emaFast: 12,
+      emaSlow: 26,
+      adxPeriod: 14,
+      adxThreshold: 25, // ADX phải chéo lên trên 25
+      slLookbackPeriod: 50, // Số nến để tìm đáy/đỉnh gần nhất cho SL (50 nến)
+      rRatio: 2, // Risk:Reward = 1:2
+      
+      // Technical
+      priceTickSize: 0,
+      sizeStep: 0,
+      pollIntervalMs: 5 * 60 * 1000, // Check mỗi 5 phút (5m)
+      
+      ...config,
+    };
+    this.isRunning = false;
+    this.priceTick = this.config.priceTickSize > 0 ? this.config.priceTickSize : null;
+    this.sizeStep = this.config.sizeStep > 0 ? this.config.sizeStep : null;
+    this.marketInfoLoaded = false;
+    this.priceDecimals = this.priceTick ? getDecimalsFromStep(this.priceTick) : 4;
+    this.currentPosition = null; // { direction, entryPrice, sl, tp, size, orderId, isActive }
+    this.emaFastHistory = []; // Lưu lịch sử EMA 12 để detect crossover
+    this.emaSlowHistory = []; // Lưu lịch sử EMA 26 để detect crossover
+    this.adxHistory = []; // Lưu lịch sử ADX để detect crossover lên 25
+    this.minLotSize = null; // Sẽ được set trong prepareMarketMeta
+  }
+
+  async run() {
+    this.isRunning = true;
+    console.log('[SMART-TREND] 🚀 Khởi động Smart Trend Bot với ADX Crossover + EMA Filter');
+    const capitalStr = this.config.capital && this.config.capital > 0 
+      ? `${this.config.capital} ${this.config.marginCoin}` 
+      : 'Auto (toàn bộ equity)';
+    console.table({
+      'Cặp giao dịch': this.config.symbol,
+      'Capital': capitalStr,
+      'Leverage': `${this.config.leverage}x`,
+      'Timeframe': this.config.timeFrame,
+      'EMA Fast': this.config.emaFast,
+      'EMA Slow': this.config.emaSlow,
+      'ADX Period': this.config.adxPeriod,
+      'ADX Threshold': this.config.adxThreshold,
+      'SL Lookback': this.config.slLookbackPeriod,
+      'R:R Ratio': `1:${this.config.rRatio}`,
+    });
+
+    await this.prepareMarketMeta();
+
+    // Kiểm tra positions hiện tại
+    console.log('[SMART-TREND] 🔍 Kiểm tra positions hiện tại...');
+    const existingPosition = await this.getCurrentPosition();
+    
+    if (existingPosition) {
+      console.log(`[SMART-TREND] ✅ Phát hiện position đang mở: ${existingPosition.direction.toUpperCase()}`);
+      console.log(`  - Entry: ${formatNumber(existingPosition.entryPrice)}`);
+      console.log(`  - SL: ${existingPosition.sl ? formatNumber(existingPosition.sl) : 'N/A'}`);
+      console.log(`  - TP: ${existingPosition.tp ? formatNumber(existingPosition.tp) : 'N/A'}`);
+      console.log(`  - Size: ${formatNumber(existingPosition.size)}`);
+      this.currentPosition = existingPosition;
+    } else {
+      console.log('[SMART-TREND] ℹ️ Không có position nào đang mở');
+    }
+
+    // Main loop - chạy đúng theo thời gian nến
+    while (this.isRunning) {
+      try {
+        // Đợi đến đầu nến tiếp theo
+        const waitTime = this.getTimeUntilNextCandle();
+        if (waitTime > 1000) {
+          const nextMinute = new Date(Date.now() + waitTime);
+          console.log(`[SMART-TREND] ⏰ Đợi ${(waitTime / 1000).toFixed(1)}s đến nến tiếp theo (${nextMinute.toLocaleTimeString()})`);
+        }
+        await sleep(waitTime);
+
+        // Sync position từ API
+        const apiPosition = await this.getCurrentPosition();
+        if (apiPosition && !this.currentPosition) {
+          this.currentPosition = apiPosition;
+        } else if (!apiPosition && this.currentPosition) {
+          console.log('[SMART-TREND] ℹ️ Position đã được đóng (có thể từ bên ngoài)');
+          this.currentPosition = null;
+        }
+
+        // Monitor position hiện tại (nếu có)
+        if (this.currentPosition && this.currentPosition.isActive) {
+          await this.monitorPosition();
+        }
+
+        // Luôn check entry signals để vào lệnh mới (dù có position hay không)
+        await this.checkEntrySignals();
+      } catch (err) {
+        console.error(`[SMART-TREND] ❌ Lỗi trong main loop: ${err.message}`);
+        if (err.stack && err.message.length < 200) {
+          console.error('[SMART-TREND] Chi tiết lỗi:', err.stack.split('\n').slice(0, 3).join('\n'));
+        }
+        // Nếu lỗi, đợi đến nến tiếp theo
+        const waitTime = this.getTimeUntilNextCandle();
+        await sleep(waitTime);
+      }
+    }
+  }
+
+  /**
+   * Lấy dữ liệu nến từ Binance
+   */
+  async fetchCandles(symbol, interval, limit = 200) {
+    try {
+      const binanceSymbol = symbol.replace('_UMCBL', '').replace('_CMCBL', '');
+      const url = 'https://api.binance.com/api/v3/klines';
+      const params = {
+        symbol: binanceSymbol.toUpperCase(),
+        interval: interval,
+        limit: limit,
+      };
+
+      const response = await axios.get(url, { params });
+      
+      if (!Array.isArray(response.data)) {
+        throw new Error('Binance API trả về dữ liệu không hợp lệ');
+      }
+
+      return response.data;
+    } catch (err) {
+      if (err.response) {
+        throw new Error(`Binance API error: ${err.response.status} - ${err.response.data?.msg || err.message}`);
+      } else if (err.request) {
+        throw new Error(`Không thể kết nối đến Binance API: ${err.message}`);
+      } else {
+        throw new Error(`Lỗi request: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Parse dữ liệu nến từ Binance
+   */
+  parseCandles(binanceCandles) {
+    const highs = [];
+    const lows = [];
+    const closes = [];
+    const opens = [];
+
+    for (const candle of binanceCandles) {
+      if (Array.isArray(candle) && candle.length >= 5) {
+        const open = parseFloat(candle[1]);
+        const high = parseFloat(candle[2]);
+        const low = parseFloat(candle[3]);
+        const close = parseFloat(candle[4]);
+
+        if (!isNaN(high) && !isNaN(low) && !isNaN(close) && !isNaN(open) && 
+            high > 0 && low > 0 && close > 0 && open > 0) {
+          highs.push(high);
+          lows.push(low);
+          closes.push(close);
+          opens.push(open);
+        }
+      }
+    }
+
+    return { highs, lows, closes, opens };
+  }
+
+  /**
+   * Tính các chỉ báo EMA, ADX
+   */
+  async calculateIndicators() {
+    try {
+      const candles = await this.fetchCandles(this.config.symbol, this.config.timeFrame, 200);
+      const { highs, lows, closes, opens } = this.parseCandles(candles);
+
+      // Loại bỏ nến cuối cùng (nến đang chạy, chưa đóng) để chỉ dùng nến đã đóng
+      // Binance thường trả về nến cuối cùng là nến đang chạy
+      const closedHighs = highs.slice(0, -1);
+      const closedLows = lows.slice(0, -1);
+      const closedCloses = closes.slice(0, -1);
+      const closedOpens = opens.slice(0, -1);
+
+      const maxPeriod = Math.max(this.config.emaFast, this.config.emaSlow, this.config.adxPeriod);
+      if (closedHighs.length < maxPeriod + 10) {
+        throw new Error(`Không đủ dữ liệu để tính chỉ báo (cần ít nhất ${maxPeriod + 10}, có ${closedHighs.length})`);
+      }
+
+      // Tính EMA Fast (12) - chỉ dùng nến đã đóng
+      const emaFastInput = {
+        values: closedCloses,
+        period: this.config.emaFast,
+      };
+      const emaFastResult = EMA.calculate(emaFastInput);
+      const latestEMAFast = emaFastResult[emaFastResult.length - 1];
+
+      // Tính EMA Slow (26) - chỉ dùng nến đã đóng
+      const emaSlowInput = {
+        values: closedCloses,
+        period: this.config.emaSlow,
+      };
+      const emaSlowResult = EMA.calculate(emaSlowInput);
+      const latestEMASlow = emaSlowResult[emaSlowResult.length - 1];
+
+      // Tính ADX - chỉ dùng nến đã đóng
+      const adxInput = {
+        high: closedHighs,
+        low: closedLows,
+        close: closedCloses,
+        period: this.config.adxPeriod,
+      };
+      const adxResult = ADX.calculate(adxInput);
+      
+      // ADX trả về array of objects: [{ adx, pdi, mdi }, ...]
+      const latestADX = adxResult.length > 0 ? adxResult[adxResult.length - 1] : null;
+      const adxValue = latestADX ? latestADX.adx : 0;
+
+      // Lưu lịch sử EMA để detect crossover (lấy 3 giá trị gần nhất từ nến đã đóng)
+      this.emaFastHistory = emaFastResult.slice(-3);
+      this.emaSlowHistory = emaSlowResult.slice(-3);
+      
+      // Lưu lịch sử ADX để detect crossover lên 25 (lấy 3 giá trị gần nhất)
+      this.adxHistory = adxResult.slice(-3).map(item => item.adx);
+
+      return {
+        emaFast: latestEMAFast || 0,
+        emaSlow: latestEMASlow || 0,
+        adx: adxValue || 0,
+        currentPrice: closes[closes.length - 1], // Giá hiện tại từ nến đang chạy
+        emaFastHistory: this.emaFastHistory,
+        emaSlowHistory: this.emaSlowHistory,
+        adxHistory: this.adxHistory,
+        // Trả về dữ liệu nến để tính SL (bao gồm cả nến đang chạy để có đủ dữ liệu)
+        highs,
+        lows,
+        closes,
+      };
+    } catch (err) {
+      console.error(`[SMART-TREND] ❌ Lỗi khi tính chỉ báo: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Tính điểm dừng lỗ (Stop Loss) dựa trên đáy/đỉnh gần nhất trong 50 nến
+   * LONG: SL = đáy thấp nhất trong 50 nến gần nhất
+   * SHORT: SL = đỉnh cao nhất trong 50 nến gần nhất
+   */
+  calculateStopLoss(entryPrice, lows, highs, direction) {
+    if (!entryPrice || entryPrice <= 0) {
+      throw new Error('Entry price không hợp lệ');
+    }
+
+    if (!lows || !highs || lows.length === 0 || highs.length === 0) {
+      throw new Error('Dữ liệu nến không hợp lệ');
+    }
+
+    // Lấy số nến gần nhất để tìm đáy/đỉnh (50 nến)
+    const lookback = Math.min(this.config.slLookbackPeriod, lows.length);
+    const recentLows = lows.slice(-lookback);
+    const recentHighs = highs.slice(-lookback);
+
+    let sl;
+
+    if (direction === 'long') {
+      // LONG: Tìm đáy thấp nhất trong 50 nến gần nhất
+      const lowestLow = Math.min(...recentLows);
+      sl = lowestLow;
+    } else {
+      // SHORT: Tìm đỉnh cao nhất trong 50 nến gần nhất
+      const highestHigh = Math.max(...recentHighs);
+      sl = highestHigh;
+    }
+
+    // Round theo priceTick
+    if (this.priceTick && this.priceTick > 0) {
+      sl = roundToTick(sl, this.priceTick);
+    }
+
+    return Number(sl.toFixed(this.priceDecimals));
+  }
+
+  /**
+   * Tính điểm chốt lời (Take Profit) dựa trên R:R ratio
+   */
+  calculateTakeProfit(entryPrice, stopLoss, direction) {
+    if (!entryPrice || !stopLoss || entryPrice <= 0 || stopLoss <= 0) {
+      throw new Error('Entry price hoặc Stop Loss không hợp lệ');
+    }
+
+    const slDistance = Math.abs(entryPrice - stopLoss);
+    const tpDistance = slDistance * this.config.rRatio;
+
+    let tp;
+    if (direction === 'long') {
+      tp = entryPrice + tpDistance;
+    } else {
+      tp = entryPrice - tpDistance;
+    }
+
+    // Round theo priceTick
+    if (this.priceTick && this.priceTick > 0) {
+      tp = roundToTick(tp, this.priceTick);
+    }
+
+    return Number(tp.toFixed(this.priceDecimals));
+  }
+
+  /**
+   * Tính khối lượng lệnh dựa trên capital (số tiền muốn vào lệnh) và leverage
+   * Formula: size = (capital × leverage) / entryPrice
+   */
+  calculateLotSize(entryPrice, equity) {
+    if (!entryPrice || entryPrice <= 0) {
+      throw new Error('Entry price không hợp lệ');
+    }
+
+    if (!equity || equity <= 0) {
+      throw new Error('Equity không hợp lệ');
+    }
+
+    // Sử dụng capital nếu được chỉ định, nếu không dùng equity
+    const capital = this.config.capital && this.config.capital > 0 
+      ? Math.min(this.config.capital, equity) 
+      : equity;
+
+    // Tính notional value (giá trị hợp đồng)
+    const notional = capital * this.config.leverage;
+
+    // Tính số contracts: size = notional / entryPrice
+    let size = notional / entryPrice;
+
+    // Round theo sizeStep
+    if (this.sizeStep && this.sizeStep > 0) {
+      size = roundToStep(size, this.sizeStep);
+    }
+
+    // Minimum lot size từ contract spec
+    const minLotSize = this.minLotSize || (this.sizeStep && this.sizeStep > 0 ? this.sizeStep : 0.001);
+
+    // Kiểm tra nếu size < minLotSize
+    if (size < minLotSize) {
+      // Nếu size < min lot size, tính lại capital tối thiểu cần thiết
+      const minNotional = minLotSize * entryPrice;
+      const minCapitalRequired = minNotional / this.config.leverage;
+      
+      return {
+        size: Number(minLotSize.toFixed(8)),
+        capital: capital,
+        minCapitalRequired: minCapitalRequired,
+        warning: `⚠️ Capital quá thấp. Lot size tính ra (${formatNumber(size)}) nhỏ hơn minimum lot size (${formatNumber(minLotSize)}). Cần ít nhất ${formatNumber(minCapitalRequired)} ${this.config.marginCoin} để mở lệnh với leverage ${this.config.leverage}x`,
+        capitalTooLow: true,
+      };
+    }
+
+    // Tính lại capital thực tế sau khi round
+    const actualNotional = size * entryPrice;
+    const actualCapital = actualNotional / this.config.leverage;
+
+    return {
+      size: Number(size.toFixed(8)),
+      capital: capital,
+      actualCapital: actualCapital,
+      notional: actualNotional,
+      warning: null,
+      capitalTooLow: false,
+    };
+  }
+
+  /**
+   * Kiểm tra tín hiệu vào lệnh LONG
+   * Điều kiện: ADX chéo lên 25 VÀ EMA12 > EMA26
+   */
+  checkLongEntry(indicators) {
+    // Kiểm tra có đủ dữ liệu EMA history
+    if (!indicators.emaFastHistory || !indicators.emaSlowHistory || 
+        indicators.emaFastHistory.length < 2 || indicators.emaSlowHistory.length < 2) {
+      return false;
+    }
+
+    // Kiểm tra có đủ dữ liệu ADX history
+    if (!indicators.adxHistory || indicators.adxHistory.length < 2) {
+      return false;
+    }
+
+    // Chỉ dùng EMA của các nến đã đóng (không dùng nến hiện tại đang chạy)
+    // nến -2 (đã đóng): emaFastPrev, emaSlowPrev
+    // nến -1 (đã đóng, gần nhất): emaFastCurr, emaSlowCurr
+    const emaFastPrev = indicators.emaFastHistory[indicators.emaFastHistory.length - 2];
+    const emaSlowPrev = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 2];
+    const emaFastCurr = indicators.emaFastHistory[indicators.emaFastHistory.length - 1];
+    const emaSlowCurr = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 1];
+
+    // 1. ADX chéo lên trên 25 (crossover)
+    // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
+    const adxPrev = indicators.adxHistory[indicators.adxHistory.length - 2];
+    const adxCurr = indicators.adxHistory[indicators.adxHistory.length - 1];
+    const adxCrossover = adxPrev < this.config.adxThreshold && adxCurr >= this.config.adxThreshold;
+
+    // 2. EMA12 > EMA26 (xu hướng tăng)
+    const emaAbove = emaFastCurr > emaSlowCurr;
+
+    return adxCrossover && emaAbove;
+  }
+
+  /**
+   * Kiểm tra tín hiệu vào lệnh SHORT
+   * Điều kiện: ADX chéo lên 25 VÀ EMA12 < EMA26
+   */
+  checkShortEntry(indicators) {
+    // Kiểm tra có đủ dữ liệu EMA history
+    if (!indicators.emaFastHistory || !indicators.emaSlowHistory || 
+        indicators.emaFastHistory.length < 2 || indicators.emaSlowHistory.length < 2) {
+      return false;
+    }
+
+    // Kiểm tra có đủ dữ liệu ADX history
+    if (!indicators.adxHistory || indicators.adxHistory.length < 2) {
+      return false;
+    }
+
+    // Chỉ dùng EMA của các nến đã đóng (không dùng nến hiện tại đang chạy)
+    // nến -2 (đã đóng): emaFastPrev, emaSlowPrev
+    // nến -1 (đã đóng, gần nhất): emaFastCurr, emaSlowCurr
+    const emaFastPrev = indicators.emaFastHistory[indicators.emaFastHistory.length - 2];
+    const emaSlowPrev = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 2];
+    const emaFastCurr = indicators.emaFastHistory[indicators.emaFastHistory.length - 1];
+    const emaSlowCurr = indicators.emaSlowHistory[indicators.emaSlowHistory.length - 1];
+
+    // 1. ADX chéo lên trên 25 (crossover)
+    // So sánh nến -2 (đã đóng) với nến -1 (đã đóng, gần nhất)
+    const adxPrev = indicators.adxHistory[indicators.adxHistory.length - 2];
+    const adxCurr = indicators.adxHistory[indicators.adxHistory.length - 1];
+    const adxCrossover = adxPrev < this.config.adxThreshold && adxCurr >= this.config.adxThreshold;
+
+    // 2. EMA12 < EMA26 (xu hướng giảm)
+    const emaBelow = emaFastCurr < emaSlowCurr;
+
+    return adxCrossover && emaBelow;
+  }
+
+  /**
+   * Kiểm tra tín hiệu vào lệnh
+   */
+  async checkEntrySignals() {
+    const indicators = await this.calculateIndicators();
+    if (!indicators) {
+      return;
+    }
+
+    console.log(`[SMART-TREND] 📊 Chỉ báo: EMA12=${formatNumber(indicators.emaFast)}, EMA26=${formatNumber(indicators.emaSlow)}, ADX=${indicators.adx.toFixed(2)}, Price=${formatNumber(indicators.currentPrice)}`);
+
+    // Kiểm tra LONG entry
+    if (this.checkLongEntry(indicators)) {
+      console.log('[SMART-TREND] ✅ Tín hiệu LONG: ADX chéo lên 25, EMA12 > EMA26');
+      await this.enterPosition('long', indicators);
+      return;
+    }
+
+    // Kiểm tra SHORT entry
+    if (this.checkShortEntry(indicators)) {
+      console.log('[SMART-TREND] ✅ Tín hiệu SHORT: ADX chéo lên 25, EMA12 < EMA26');
+      await this.enterPosition('short', indicators);
+      return;
+    }
+
+    // Không có tín hiệu vào lệnh
+    const emaAbove = indicators.emaFast > indicators.emaSlow;
+    const adxAbove = indicators.adx >= this.config.adxThreshold;
+    
+    if (emaAbove && !adxAbove) {
+      console.log(`[SMART-TREND] ⏳ EMA12 > EMA26 (xu hướng tăng) nhưng ADX=${indicators.adx.toFixed(2)} < ${this.config.adxThreshold} - Chờ ADX chéo lên`);
+    } else if (!emaAbove && !adxAbove) {
+      console.log(`[SMART-TREND] ⏳ EMA12 < EMA26 (xu hướng giảm) nhưng ADX=${indicators.adx.toFixed(2)} < ${this.config.adxThreshold} - Chờ ADX chéo lên`);
+    } else if (emaAbove && adxAbove) {
+      console.log(`[SMART-TREND] ⏳ EMA12 > EMA26 và ADX >= ${this.config.adxThreshold} nhưng chưa có crossover ADX (đã cắt từ trước)`);
+    } else {
+      console.log(`[SMART-TREND] ⏳ EMA12 < EMA26 và ADX >= ${this.config.adxThreshold} nhưng chưa có crossover ADX (đã cắt từ trước)`);
+    }
+  }
+
+  /**
+   * Vào lệnh
+   */
+  async enterPosition(direction, indicators) {
+    try {
+      const entryPrice = indicators.currentPrice;
+      const { lows, highs } = indicators;
+
+      if (!lows || !highs || lows.length === 0 || highs.length === 0) {
+        throw new Error('Dữ liệu nến không hợp lệ, không thể tính SL');
+      }
+
+      // Tính SL dựa trên đáy/đỉnh trong 50 nến gần nhất
+      const stopLoss = this.calculateStopLoss(entryPrice, lows, highs, direction);
+
+      // Tính TP dựa trên R:R ratio
+      const takeProfit = this.calculateTakeProfit(entryPrice, stopLoss, direction);
+
+      // Lấy equity (vốn)
+      const equity = await this.getEquity();
+
+      // Tính lot size dựa trên capital và leverage
+      const lotSizeResult = this.calculateLotSize(entryPrice, equity);
+
+      console.log(`[SMART-TREND] 📈 Vào lệnh ${direction.toUpperCase()}:`);
+      console.log(`  - Entry: ${formatNumber(entryPrice)}`);
+      console.log(`  - SL: ${formatNumber(stopLoss)} (distance: ${formatNumber(Math.abs(entryPrice - stopLoss))})`);
+      console.log(`  - TP: ${formatNumber(takeProfit)} (distance: ${formatNumber(Math.abs(entryPrice - takeProfit))})`);
+      console.log(`  - Lot Size: ${formatNumber(lotSizeResult.size)}`);
+      console.log(`  - Capital sử dụng: ${formatNumber(lotSizeResult.actualCapital || lotSizeResult.capital)} ${this.config.marginCoin} (${this.config.capital && this.config.capital > 0 ? `đã chỉ định: ${this.config.capital}` : 'toàn bộ equity'})`);
+      console.log(`  - Leverage: ${this.config.leverage}x`);
+      console.log(`  - Notional Value: ${formatNumber(lotSizeResult.notional || lotSizeResult.size * entryPrice)} ${this.config.marginCoin}`);
+
+      // Hiển thị warning nếu có
+      if (lotSizeResult.warning) {
+        console.warn(`[SMART-TREND] ${lotSizeResult.warning}`);
+      }
+
+      // Set leverage
+      await this.configureLeverage();
+
+      // Kiểm tra nếu capital quá thấp
+      if (lotSizeResult.capitalTooLow && lotSizeResult.minCapitalRequired) {
+        throw new Error(`Capital quá thấp! Cần ít nhất ${formatNumber(lotSizeResult.minCapitalRequired)} ${this.config.marginCoin} để mở lệnh với leverage ${this.config.leverage}x. Hiện tại: ${formatNumber(lotSizeResult.capital)} ${this.config.marginCoin}`);
+      }
+
+      // Mở position với SL/TP
+      const side = direction === 'long' ? 'open_long' : 'open_short';
+      await this.api.placeOrder({
+        symbol: this.config.symbol,
+        marginCoin: this.config.marginCoin,
+        size: lotSizeResult.size.toString(),
+        side,
+        orderType: 'market',
+        presetStopLossPrice: stopLoss.toString(),
+        presetTakeProfitPrice: takeProfit.toString(),
+      });
+
+      console.log(`[SMART-TREND] ✅ Đã mở position ${direction.toUpperCase()} thành công`);
+
+      // Lưu position state
+      this.currentPosition = {
+        direction,
+        entryPrice,
+        sl: stopLoss,
+        tp: takeProfit,
+        size: lotSizeResult.size,
+        isActive: true,
+        orderId: null,
+      };
+
+      // Đợi một chút để position được mở
+      await sleep(2000);
+
+      // Verify position
+      const apiPosition = await this.getCurrentPosition();
+      if (apiPosition) {
+        this.currentPosition = apiPosition;
+      }
+    } catch (err) {
+      console.error(`[SMART-TREND] ❌ Lỗi khi vào lệnh: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Tính thời gian đến nến tiếp theo dựa trên timeframe (tính bằng milliseconds)
+   * Ví dụ: 5m → Nếu hiện tại là 10:03:30, nến tiếp theo là 10:05:00 → trả về 90000ms
+   */
+  getTimeUntilNextCandle() {
+    const now = new Date();
+    const currentSeconds = now.getSeconds();
+    const currentMilliseconds = now.getMilliseconds();
+    
+    // Parse timeframe (1m, 5m, 15m, etc.)
+    const timeframeMatch = this.config.timeFrame.match(/^(\d+)([mhd])$/i);
+    if (!timeframeMatch) {
+      // Fallback: mặc định 5 phút
+      const minutes = 5;
+      const currentMinutes = now.getMinutes();
+      const minutesUntilNext = minutes - (currentMinutes % minutes);
+      const secondsUntilNext = (minutesUntilNext * 60) - currentSeconds;
+      return Math.max((secondsUntilNext * 1000) - currentMilliseconds, 100);
+    }
+    
+    const interval = parseInt(timeframeMatch[1]);
+    const unit = timeframeMatch[2].toLowerCase();
+    
+    let secondsUntilNext = 0;
+    
+    if (unit === 'm') {
+      // Minutes
+      const currentMinutes = now.getMinutes();
+      const minutesUntilNext = interval - (currentMinutes % interval);
+      secondsUntilNext = (minutesUntilNext * 60) - currentSeconds;
+    } else if (unit === 'h') {
+      // Hours
+      const currentMinutes = now.getMinutes();
+      const currentSecondsInHour = currentMinutes * 60 + currentSeconds;
+      const intervalSeconds = interval * 3600;
+      secondsUntilNext = intervalSeconds - (currentSecondsInHour % intervalSeconds);
+    } else if (unit === 'd') {
+      // Days
+      const currentHours = now.getHours();
+      const currentMinutes = now.getMinutes();
+      const currentSecondsInDay = currentHours * 3600 + currentMinutes * 60 + currentSeconds;
+      const intervalSeconds = interval * 86400;
+      secondsUntilNext = intervalSeconds - (currentSecondsInDay % intervalSeconds);
+    }
+    
+    const millisecondsUntilNext = (secondsUntilNext * 1000) - currentMilliseconds;
+    
+    // Đảm bảo ít nhất đợi 100ms để tránh chạy quá sớm
+    return Math.max(millisecondsUntilNext, 100);
+  }
+
+  /**
+   * Monitor position hiện tại
+   */
+  async monitorPosition() {
+    if (!this.currentPosition || !this.currentPosition.isActive) {
+      return;
+    }
+
+    try {
+      // Lấy chỉ báo hiện tại
+      const indicators = await this.calculateIndicators();
+      if (!indicators) {
+        return;
+      }
+
+      // Lấy giá hiện tại từ API
+      const ticker = await this.api.getTicker(this.config.symbol);
+      const currentPrice = Number(ticker?.last || ticker?.markPrice);
+
+      if (!currentPrice || currentPrice <= 0) {
+        return;
+      }
+
+      const { direction, entryPrice } = this.currentPosition;
+
+      // Chỉ log status, không đóng lệnh
+      // SL/TP được exchange tự động xử lý
+      const pnlPercent = direction === 'long'
+        ? ((currentPrice - entryPrice) / entryPrice) * 100
+        : ((entryPrice - currentPrice) / entryPrice) * 100;
+
+      console.log(`[SMART-TREND] 📊 Position ${direction.toUpperCase()}: Entry=${formatNumber(entryPrice)}, Current=${formatNumber(currentPrice)}, PnL=${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
+    } catch (err) {
+      console.error(`[SMART-TREND] ❌ Lỗi khi monitor position: ${err.message}`);
+    }
+  }
+
+  /**
+   * Đóng position
+   */
+  async closePosition() {
+    // Lấy position từ API để đảm bảo có dữ liệu mới nhất
+    const apiPosition = await this.getCurrentPosition();
+    
+    if (!apiPosition || !apiPosition.isActive) {
+      // Nếu không có position từ API, clear local state
+      if (this.currentPosition) {
+        this.currentPosition.isActive = false;
+        this.currentPosition = null;
+      }
+      return;
+    }
+
+    try {
+      const { direction, size } = apiPosition;
+
+      // Thử đóng bằng closePosition API trước
+      try {
+        await this.api.closePosition({
+          symbol: this.config.symbol,
+          marginCoin: this.config.marginCoin,
+          holdSide: direction,
+        });
+        console.log(`[SMART-TREND] ✅ Đã đóng position ${direction.toUpperCase()}`);
+      } catch (closeErr) {
+        // Nếu closePosition fail, dùng placeOrder
+        console.log(`[SMART-TREND] ⚠️ closePosition API fail, dùng placeOrder: ${closeErr.message}`);
+        const side = direction === 'long' ? 'close_long' : 'close_short';
+        await this.api.placeOrder({
+          symbol: this.config.symbol,
+          marginCoin: this.config.marginCoin,
+          size: size ? size.toString() : '0',
+          side,
+          orderType: 'market',
+        });
+        console.log(`[SMART-TREND] ✅ Đã đóng position ${direction.toUpperCase()} bằng placeOrder`);
+      }
+
+      // Clear local state
+      this.currentPosition.isActive = false;
+      this.currentPosition = null;
+
+      // Clear history
+      this.emaFastHistory = [];
+      this.emaSlowHistory = [];
+      this.adxHistory = [];
+    } catch (err) {
+      console.error(`[SMART-TREND] ❌ Lỗi khi đóng position: ${err.message}`);
+      // Vẫn clear local state dù có lỗi
+      if (this.currentPosition) {
+        this.currentPosition.isActive = false;
+        this.currentPosition = null;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Lấy position hiện tại từ API
+   */
+  async getCurrentPosition() {
+    try {
+      const positionData = await this.api.getPosition(this.config.symbol, this.config.marginCoin);
+      
+      // Xử lý nếu API trả về array
+      let position = positionData;
+      if (Array.isArray(positionData)) {
+        if (positionData.length === 0) {
+          return null;
+        }
+        // Lấy position đầu tiên có size > 0
+        position = positionData.find(p => {
+          const size = Number(p.total || p.holdSize || p.size || 0);
+          return size > 0;
+        });
+        if (!position) {
+          return null;
+        }
+      }
+      
+      if (!position) {
+        return null;
+      }
+
+      const totalSize = Number(position.total || position.holdSize || position.size || 0);
+      if (totalSize <= 0) {
+        return null;
+      }
+
+      const direction = position.holdSide || position.side || position.direction;
+      const entryPrice = Number(position.averageOpenPrice || position.openPriceAvg || position.entryPrice || position.avgEntryPrice || 0);
+
+      if (entryPrice <= 0) {
+        return null;
+      }
+
+      return {
+        direction: direction === 'long' ? 'long' : 'short',
+        entryPrice,
+        size: totalSize,
+        isActive: true,
+        orderId: position.positionId || null,
+      };
+    } catch (err) {
+      // Không có position hoặc lỗi
+      return null;
+    }
+  }
+
+  /**
+   * Lấy equity (vốn) hiện tại
+   */
+  async getEquity() {
+    try {
+      const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : 'umcbl';
+      const account = await this.api.getAccount(productType, this.config.marginCoin);
+      
+      const equity = Number(
+        account?.equity || 
+        account?.availableEquity || 
+        account?.availableBalance || 
+        account?.available ||
+        0
+      );
+
+      if (equity <= 0) {
+        throw new Error('Equity không hợp lệ hoặc không đủ vốn');
+      }
+
+      return equity;
+    } catch (err) {
+      console.error(`[SMART-TREND] ❌ Lỗi khi lấy equity: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Set leverage
+   */
+  async configureLeverage() {
+    if (this.config.leverage && this.config.leverage > 0) {
+      try {
+        // Set leverage cho cả Long và Short
+        await Promise.all([
+          this.api.setLeverage({
+            symbol: this.config.symbol,
+            marginCoin: this.config.marginCoin,
+            leverage: this.config.leverage,
+            holdSide: 'long',
+          }),
+          this.api.setLeverage({
+            symbol: this.config.symbol,
+            marginCoin: this.config.marginCoin,
+            leverage: this.config.leverage,
+            holdSide: 'short',
+          }),
+        ]);
+        console.log(`[SMART-TREND] ✅ Đã set leverage ${this.config.leverage}x cho Long và Short`);
+      } catch (err) {
+        console.warn(`[SMART-TREND] ⚠️ Không thể set leverage: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Chuẩn bị market metadata
+   */
+  async prepareMarketMeta() {
+    if (this.marketInfoLoaded) return;
+    
+    try {
+      const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : undefined;
+      const contract = await this.api.getContract(this.config.symbol, productType);
+      
+      if (!contract) {
+        throw new Error(`Không tìm thấy contract "${this.config.symbol}"`);
+      }
+
+      const derivedPriceTick = Number(
+        contract.priceTick || 
+        contract.priceStep || 
+        contract.minPriceChange || 
+        0
+      );
+      
+      const derivedSizeStep = Number(
+        contract.quantityTick || 
+        contract.sizeTick || 
+        contract.minTradeNum || 
+        0
+      );
+
+      if (!this.priceTick && derivedPriceTick > 0) {
+        this.priceTick = derivedPriceTick;
+        this.priceDecimals = getDecimalsFromStep(this.priceTick);
+      }
+
+      if (!this.sizeStep && derivedSizeStep > 0) {
+        this.sizeStep = derivedSizeStep;
+      }
+
+      // Lấy min lot size từ contract (nếu có)
+      this.minLotSize = Number(
+        contract.minTradeNum ||
+        contract.minSize ||
+        contract.minOrderSize ||
+        this.sizeStep ||
+        0.001
+      );
+
+      console.log(`[SMART-TREND] ℹ️ Thông tin contract: tick giá=${this.priceTick || 'AUTO'}, bước khối lượng=${this.sizeStep || 'AUTO'}, min lot size=${formatNumber(this.minLotSize)}`);
+    } catch (err) {
+      console.warn(`[SMART-TREND] ⚠️ Không lấy được contract spec: ${err.message}`);
+      this.priceTick = this.priceTick || 0.01;
+      this.priceDecimals = getDecimalsFromStep(this.priceTick);
+      this.sizeStep = this.sizeStep || 0.0001;
+    } finally {
+      this.marketInfoLoaded = true;
+    }
+  }
+}
+
+module.exports = { SmartTrendBot };
+
