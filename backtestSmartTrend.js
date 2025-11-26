@@ -86,6 +86,17 @@ const argv = yargs(hideBin(process.argv))
     describe: 'Minutes offset from UTC for displaying timestamps (e.g., 420 for UTC+7)',
     default: 0,
   })
+  .option('fee', {
+    type: 'boolean',
+    describe: 'True để tính thêm phí giao dịch theo đòn bẩy (x10=1.2%, x5=0.5%)',
+    default: false,
+  })
+  .option('feeBasis', {
+    type: 'string',
+    describe: 'Cơ sở tính phí: "notional" (đòn bẩy × vốn) hoặc "capital" (chỉ vốn)',
+    choices: ['notional', 'capital'],
+    default: 'notional',
+  })
   .option('priceTick', {
     type: 'number',
     describe: 'Price tick size (0 = no rounding)',
@@ -130,6 +141,8 @@ const config = {
   priceDecimals: argv.priceTick > 0 ? getDecimalsFromStep(argv.priceTick) : 4,
   verbose: argv.verbose,
   timezoneOffset: Number(argv.timezoneOffset) || 0,
+  fee: argv.fee,
+  feeBasis: argv.feeBasis || 'notional',
 };
 
 const LOOKBACK_MS = config.lookbackDays * 24 * 60 * 60 * 1000;
@@ -144,8 +157,8 @@ async function main() {
   const timeFrameMs = resolveTimeFrameMs(config.timeFrame);
   const binanceSymbol = normalizeSymbol(config.symbol);
 
-  console.log(`[BACKTEST] Symbol=${config.symbol} (${binanceSymbol} on Binance)`);
-  console.log(`[BACKTEST] Timeframe=${config.timeFrame}, Window=${new Date(startTime).toISOString()} → ${new Date(endTime).toISOString()}`);
+  console.log(`[BACKTEST] Ký hiệu: ${config.symbol} (Binance ${binanceSymbol})`);
+  console.log(`[BACKTEST] Khung thời gian: ${config.timeFrame}, khoảng: ${new Date(startTime).toISOString()} → ${new Date(endTime).toISOString()}`);
   console.log(`[BACKTEST] Hiển thị thời gian theo UTC${formatOffset(config.timezoneOffset)}`);
 
   const rawCandles = await fetchHistoricalCandles(binanceSymbol, config.timeFrame, timeFrameMs, startTime, endTime);
@@ -156,7 +169,7 @@ async function main() {
   // Drop the latest candle assuming it might still be forming
   rawCandles.pop();
 
-  console.log(`[BACKTEST] ${rawCandles.length} closed candles loaded`);
+  console.log(`[BACKTEST] Đã tải ${rawCandles.length} nến đóng`);
 
   const candles = rawCandles.map((item) => ({
     time: item[0],
@@ -168,9 +181,9 @@ async function main() {
   }));
 
   const indicators = buildIndicatorData(candles, config);
-  const { trades, endingEquity } = runSimulation(candles, indicators, config);
+  const { trades, endingEquity, maxConcurrentTrades } = runSimulation(candles, indicators, config);
 
-  renderSummary(trades, endingEquity, config);
+  renderSummary(trades, endingEquity, config, maxConcurrentTrades);
 }
 
 main().catch((err) => {
@@ -287,12 +300,14 @@ function runSimulation(candles, indicators, config) {
   const trades = [];
   const activeTrades = [];
   let equity = config.initialEquity;
+  let maxConcurrentTrades = 0;
+  const feePercent = config.fee ? getFeePercent(config.leverage) : 0;
   const logTrade = config.verbose
-    ? (trade) => console.log('[TRADE]', formatTradeForLog(trade, config))
+    ? (trade) => console.log('[LỆNH]', formatTradeForLog(trade, config))
     : () => {};
 
   for (let i = startIndex; i < candles.length - 1; i++) {
-    processActiveTrades(i, candles, activeTrades, trades, config, (pnl) => {
+    processActiveTrades(i, candles, activeTrades, trades, config, feePercent, (pnl) => {
       equity += pnl;
     }, logTrade);
 
@@ -354,6 +369,7 @@ function runSimulation(candles, indicators, config) {
             adxPrev: entryAdxPrev,
             adxCurr: entryAdxCurr,
           });
+          maxConcurrentTrades = Math.max(maxConcurrentTrades, activeTrades.length);
         } else if (config.verbose) {
           console.warn('[BACKTEST] ⚠️ Không đủ vốn để mở lệnh mới.');
         }
@@ -364,7 +380,7 @@ function runSimulation(candles, indicators, config) {
   // Force close any remaining active trades at last candle
   const lastCandle = candles[candles.length - 1];
   activeTrades.slice().forEach((trade) => {
-    closeTradeAtEnd(trade, candles, lastCandle, candles.length - 1, trades, config, (pnl) => {
+    closeTradeAtEnd(trade, candles, lastCandle, candles.length - 1, trades, config, feePercent, (pnl) => {
       equity += pnl;
     }, (tradeInfo) => {
       if (config.verbose) {
@@ -374,10 +390,10 @@ function runSimulation(candles, indicators, config) {
   });
   activeTrades.length = 0;
 
-  return { trades, endingEquity: equity };
+  return { trades, endingEquity: equity, maxConcurrentTrades };
 }
 
-function processActiveTrades(index, candles, activeTrades, trades, config, onPnl, onTradeLog) {
+function processActiveTrades(index, candles, activeTrades, trades, config, feePercent, onPnl, onTradeLog) {
   const candle = candles[index];
   for (let j = activeTrades.length - 1; j >= 0; j--) {
     const trade = activeTrades[j];
@@ -390,7 +406,7 @@ function processActiveTrades(index, candles, activeTrades, trades, config, onPnl
       continue;
     }
 
-    const closedTrade = finalizeTrade(trade, exitInfo, index, candles);
+    const closedTrade = finalizeTrade(trade, exitInfo, index, candles, feePercent, config.leverage, config.feeBasis);
     activeTrades.splice(j, 1);
     trades.push(closedTrade);
     onPnl(closedTrade.pnl);
@@ -398,12 +414,12 @@ function processActiveTrades(index, candles, activeTrades, trades, config, onPnl
   }
 }
 
-function closeTradeAtEnd(trade, candles, lastCandle, lastIndex, trades, config, onPnl, onTradeLog) {
+function closeTradeAtEnd(trade, candles, lastCandle, lastIndex, trades, config, feePercent, onPnl, onTradeLog) {
   const exitInfo = {
     exitPrice: lastCandle.close,
     exitReason: 'end-of-data',
   };
-  const closedTrade = finalizeTrade(trade, exitInfo, lastIndex, candles);
+  const closedTrade = finalizeTrade(trade, exitInfo, lastIndex, candles, feePercent, config.leverage, config.feeBasis);
   trades.push(closedTrade);
   onPnl(closedTrade.pnl);
   onTradeLog(closedTrade);
@@ -430,12 +446,19 @@ function evaluateExit(trade, candle) {
   return null;
 }
 
-function finalizeTrade(trade, exitInfo, exitIndex, candles) {
+function finalizeTrade(trade, exitInfo, exitIndex, candles, feePercent, leverage, feeBasis) {
   const exitPrice = exitInfo.exitPrice;
-  const pnl = trade.direction === 'long'
+  const grossPnl = trade.direction === 'long'
     ? (exitPrice - trade.entryPrice) * trade.size
     : (trade.entryPrice - exitPrice) * trade.size;
-  const pnlPercent = trade.capitalUsed > 0 ? (pnl / trade.capitalUsed) * 100 : 0;
+  const baseAmount = feeBasis === 'capital'
+    ? (trade.capitalUsed || 0)
+    : (trade.capitalUsed || 0) * (leverage || 1);
+  const feeAmount = feePercent && baseAmount > 0
+    ? baseAmount * (feePercent / 100)
+    : 0;
+  const netPnl = grossPnl - feeAmount;
+  const pnlPercent = trade.capitalUsed > 0 ? (netPnl / trade.capitalUsed) * 100 : 0;
 
   return {
     ...trade,
@@ -443,7 +466,9 @@ function finalizeTrade(trade, exitInfo, exitIndex, candles) {
     exitTime: new Date(candles[exitIndex].time).toISOString(),
     exitPrice,
     exitReason: exitInfo.exitReason,
-    pnl,
+    pnl: netPnl,
+    pnlGross: grossPnl,
+    fee: feeAmount,
     pnlPercent,
     durationCandles: exitIndex - trade.entryIndex + 1,
   };
@@ -536,7 +561,7 @@ function formatNumberOrDash(value) {
   return formatNumber(value, 4);
 }
 
-function renderSummary(trades, endingEquity, config) {
+function renderSummary(trades, endingEquity, config, maxConcurrentTrades) {
   if (!trades.length) {
     console.log('[BACKTEST] Không có giao dịch nào được kích hoạt trong khung thời gian.');
     return;
@@ -550,6 +575,8 @@ function renderSummary(trades, endingEquity, config) {
   const referenceCapital = config.capital || config.initialEquity || 1;
   const totalPnlPercent = referenceCapital ? (totalPnl / referenceCapital) * 100 : null;
   const avgPnlPercent = referenceCapital ? (averagePnl / referenceCapital) * 100 : null;
+  const totalFees = trades.reduce((sum, t) => sum + (t.fee || 0), 0);
+  const feePercent = config.fee ? getFeePercent(config.leverage) : 0;
 
   console.log('\n[BACKTEST] Tổng kết chiến lược:');
   console.log(`  - Tổng lệnh: ${trades.length}`);
@@ -561,6 +588,11 @@ function renderSummary(trades, endingEquity, config) {
     `  - Avg PnL/trade: ${formatNumber(averagePnl)}${avgPnlPercent !== null ? ` (${avgPnlPercent.toFixed(2)}% of reference capital)` : ''}`
   );
   console.log(`  - Trung bình đóng sau ${Math.round(totalDuration / trades.length)} nến`);
+  console.log(`  - Số lệnh mở cùng lúc tối đa: ${maxConcurrentTrades}`);
+  console.log(`  - Tổng phí (nếu có): ${formatFeeValue(totalFees)}`);
+  if (feePercent) {
+    console.log(`  - Fee rate: ${feePercent}% trên notional mỗi lệnh`);
+  }
   console.log(`  - Ending equity (approx): ${formatNumber(endingEquity)}`);
 
   console.log('\n[BACKTEST] Các lệnh gần nhất:');
@@ -569,8 +601,9 @@ function renderSummary(trades, endingEquity, config) {
     const adxCurrLog = formatAdxValue(trade.adxCurr);
     const entryLocal = formatTimestampWithOffset(trade.entryTime, config.timezoneOffset);
     const exitLocal = formatTimestampWithOffset(trade.exitTime, config.timezoneOffset);
+    const feeLog = formatFeeValue(trade.fee);
     console.log(
-      `  • ${trade.direction.toUpperCase()} | ${trade.exitReason} | Entry=${formatNumberOrDash(trade.entryPrice)} @ ${entryLocal} → Exit=${formatNumberOrDash(trade.exitPrice)} @ ${exitLocal} | ADX prev=${adxPrevLog} curr=${adxCurrLog} | PnL=${formatNumber(trade.pnl)} (${trade.pnlPercent.toFixed(2)}%)`
+      `  • ${trade.direction.toUpperCase()} | ${trade.exitReason} | Entry=${formatNumberOrDash(trade.entryPrice)} @ ${entryLocal} → Exit=${formatNumberOrDash(trade.exitPrice)} @ ${exitLocal} | ADX prev=${adxPrevLog} curr=${adxCurrLog} | PnL=${formatNumber(trade.pnl)} (${trade.pnlPercent.toFixed(2)}%) | Fee=${feeLog}`
     );
   });
 }
@@ -585,6 +618,8 @@ function formatTradeForLog(trade, config) {
     ...trade,
     entryTimeLocal: formatTimestampWithOffset(trade.entryTime, config.timezoneOffset),
     exitTimeLocal: formatTimestampWithOffset(trade.exitTime, config.timezoneOffset),
+    feeDisplay: formatFeeValue(trade.fee),
+    pnlGrossDisplay: formatNumber(trade.pnlGross || 0, 4),
   };
 }
 
@@ -610,5 +645,18 @@ function formatOffset(offsetMinutes) {
     return `${sign}${hours}`;
   }
   return `${sign}${hours}:${minutes.toString().padStart(2, '0')}`;
+}
+
+function formatFeeValue(value) {
+  if (value === null || value === undefined) return '-';
+  return formatNumber(value, 4);
+}
+
+function getFeePercent(leverage) {
+  const feeMap = {
+    10: 1.2,
+    5: 0.5,
+  };
+  return feeMap[leverage] || 0;
 }
 
