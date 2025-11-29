@@ -64,13 +64,6 @@ async function main() {
   const timeFrameMs = resolveTimeFrameMs(config.timeFrame);
   const binanceSymbol = normalizeSymbol(config.symbol);
 
-  console.log(`[SMC-BACKTEST] Ký hiệu: ${config.symbol} (Binance ${binanceSymbol})`);
-  console.log(
-    `[SMC-BACKTEST] Khung thời gian: ${config.timeFrame}, khoảng: ${new Date(
-      startTime,
-    ).toISOString()} → ${new Date(endTime).toISOString()}`,
-  );
-
   const rawCandles = await fetchHistoricalCandles(
     binanceSymbol,
     config.timeFrame,
@@ -85,8 +78,6 @@ async function main() {
 
   // Bỏ nến cuối cùng (có thể chưa đóng)
   rawCandles.pop();
-
-  console.log(`[SMC-BACKTEST] Đã tải ${rawCandles.length} nến đóng từ Binance`);
 
   const candles = rawCandles.map((row) => ({
     time: row[0],
@@ -108,62 +99,48 @@ async function main() {
     closes,
     opens: candles.map((c) => c.open),
     times,
-    swingsLength: 50, // mặc định giống SMC.pine
+    swingsLength: 50,
     internalSize: 5,
-    showStructure: true,
-    showInternals: true,
+    showStructure: false, // Tắt swing structure
+    showInternals: true, // Chỉ hiển thị internal structure
     showSwingOrderBlocks: false,
     showInternalOrderBlocks: false,
     showFairValueGaps: false,
     showEqualHighsLows: false,
   });
 
-  console.log(`[SMC-BACKTEST] Tổng số signals: ${smc.signals.length}`);
-  console.log(`[SMC-BACKTEST] BOS signals: ${smc.bosSignals.length}`);
-  console.log(`[SMC-BACKTEST] CHoCH signals: ${smc.chochSignals.length}`);
-  console.log(`[SMC-BACKTEST] Swing trend: ${smc.swingTrend}`);
-  console.log(`[SMC-BACKTEST] Swing high: ${smc.swingHigh}, Swing low: ${smc.swingLow}`);
-  console.log(`[SMC-BACKTEST] Internal high: ${smc.internalHigh}, Internal low: ${smc.internalLow}`);
-  console.log(`[SMC-BACKTEST] ATR measure: ${smc.atrMeasure}`);
-  console.log(`[SMC-BACKTEST] Số nến đã xử lý: ${candles.length}`);
-
-  const chochSignals = smc.chochSignals;
-
-  if (!chochSignals.length) {
-    console.log('[SMC-BACKTEST] Không phát hiện CHoCH nào trong khoảng dữ liệu.');
-    console.log('[SMC-BACKTEST] Debug: In ra 10 signals đầu tiên để kiểm tra:');
-    smc.signals.slice(0, 10).forEach((sig, idx) => {
-      console.log(`  ${idx + 1}. ${sig.type} ${sig.direction} at index ${sig.index}, level=${sig.level}`);
-    });
+  // Lấy tất cả internal signals (cả CHoCH và BOS)
+  const chochSignals = smc.chochSignals.filter((s) => s.internal);
+  const bosSignals = smc.bosSignals.filter((s) => s.internal);
+  const allSignals = [...chochSignals, ...bosSignals].sort((a, b) => a.index - b.index);
+  
+  if (!allSignals.length) {
+    console.log('[SMC-BACKTEST] Không phát hiện internal signals nào trong khoảng dữ liệu.');
     return;
   }
 
-  const bullish = chochSignals.filter((s) => s.direction === 'bullish').length;
-  const bearish = chochSignals.filter((s) => s.direction === 'bearish').length;
+  const bullishChoch = chochSignals.filter((s) => s.direction === 'bullish').length;
+  const bearishChoch = chochSignals.filter((s) => s.direction === 'bearish').length;
+  const bullishBos = bosSignals.filter((s) => s.direction === 'bullish').length;
+  const bearishBos = bosSignals.filter((s) => s.direction === 'bearish').length;
 
-  console.log('\n[SMC-BACKTEST] Tổng kết CHoCH:');
-  console.log(`  - Tổng số CHoCH: ${chochSignals.length}`);
-  console.log(`  - Bullish CHoCH: ${bullish}`);
-  console.log(`  - Bearish CHoCH: ${bearish}`);
-  console.log(`  - Swing lookback: ${config.swingLookback} nến`);
+  console.log(`\n[SMC-BACKTEST] Internal Signals:`);
+  console.log(`  - CHoCH: ${chochSignals.length} (Bullish: ${bullishChoch}, Bearish: ${bearishChoch})`);
+  console.log(`  - BOS: ${bosSignals.length} (Bullish: ${bullishBos}, Bearish: ${bearishBos})`);
 
   const toShow =
-    config.limit > 0 ? chochSignals.slice(-config.limit) : chochSignals;
+    config.limit > 0 ? allSignals.slice(-config.limit) : allSignals;
 
-  console.log(`\n[SMC-BACKTEST] Danh sách CHoCH (gần nhất trước):`);
-  toShow.forEach((sig) => {
+  console.log(`\n[SMC-BACKTEST] Danh sách Internal Signals (GMT+7):`);
+  toShow.forEach((sig, idx) => {
     const candle = candles[sig.index] || null;
-    const price = candle ? candle.close : sig.level;
     const timeLocal = formatTimestampWithOffset(
       sig.time || (candle ? candle.time : null),
       config.timezoneOffset,
     );
-    console.log(
-      `  • ${sig.direction.toUpperCase()} CHoCH | Thời gian: ${timeLocal} | Giá gần: ${formatNumber(
-        price,
-        4,
-      )} | Level: ${formatNumber(sig.level, 4)} | index=${sig.index}`,
-    );
+    const trendLabel = sig.trendBiasBefore === 1 ? 'BULLISH' : sig.trendBiasBefore === -1 ? 'BEARISH' : 'NEUTRAL';
+    const passedFilter = sig.passedExtraCondition !== undefined ? (sig.passedExtraCondition ? '✓' : '✗') : '';
+    console.log(`  ${idx + 1}. ${sig.direction.toUpperCase()} ${sig.type} | ${timeLocal} | Trend before: ${trendLabel} ${passedFilter}`);
   });
 }
 
@@ -244,16 +221,21 @@ function formatTimestampWithOffset(timestamp, offsetMinutes) {
   const base = Number(timestamp);
   if (Number.isNaN(base)) return String(timestamp);
   const adjusted = new Date(base + offsetMinutes * 60000);
+  // Format: YYYY-MM-DD HH:MM:SS (GMT+7)
+  const year = adjusted.getUTCFullYear();
+  const month = String(adjusted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(adjusted.getUTCDate()).padStart(2, '0');
+  const hours = String(adjusted.getUTCHours()).padStart(2, '0');
+  const minutes = String(adjusted.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(adjusted.getUTCSeconds()).padStart(2, '0');
   const sign = offsetMinutes >= 0 ? '+' : '-';
   const absMinutes = Math.abs(offsetMinutes);
-  const hours = Math.floor(absMinutes / 60);
-  const minutes = absMinutes % 60;
-  const offsetLabel = `${sign}${hours.toString().padStart(2, '0')}:${minutes
-    .toString()
-    .padStart(2, '0')}`;
-  return `${adjusted.toISOString()
-    .replace('T', ' ')
-    .replace('.000Z', '')} (UTC${offsetLabel})`;
+  const offsetHours = Math.floor(absMinutes / 60);
+  const offsetMins = absMinutes % 60;
+  const offsetLabel = offsetMins > 0 
+    ? `${sign}${String(offsetHours).padStart(2, '0')}:${String(offsetMins).padStart(2, '0')}`
+    : `${sign}${offsetHours}`;
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} (GMT${offsetLabel})`;
 }
 
 

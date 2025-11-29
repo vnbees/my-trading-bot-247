@@ -401,6 +401,14 @@ function displayStructure({
     bullishBar = currentHigh - maxCO > minCO - currentLow;
     bearishBar = currentHigh - maxCO < minCO - currentLow;
   }
+  
+  // Debug: log confluence filter values
+  const debugInfo = {
+    bullishBar,
+    bearishBar,
+    internalFilterConfluence,
+    internal
+  };
 
   // Check bullish breakout (crossover)
   if (pivotHigh && pivotHigh.currentLevel !== null) {
@@ -414,6 +422,8 @@ function displayStructure({
       !pivotHigh.crossed &&
       extraCondition
     ) {
+      // Trong Pine: nếu trend.bias == BEARISH thì là CHoCH, ngược lại là BOS
+      // Nhưng nếu trend.bias == 0 (neutral), breakout đầu tiên phải là BOS
       const tag = trend.bias === BEARISH ? 'CHoCH' : 'BOS';
       const direction = 'bullish';
 
@@ -424,6 +434,8 @@ function displayStructure({
         direction,
         level: pivotHigh.currentLevel,
         internal,
+        trendBiasBefore: trend.bias, // Debug: trend bias trước khi update
+        passedExtraCondition: extraCondition, // Debug: extraCondition
       });
 
       pivotHigh.crossed = true;
@@ -451,14 +463,44 @@ function displayStructure({
       ? pivotLow.currentLevel !== (swingLow?.currentLevel ?? null) && bearishBar
       : true;
 
+    // Debug for specific index
+    if (currentIndex === 66 && internal) {
+      console.log(`\n[DEBUG] Bar index 66 (21:40):`);
+      console.log(`  pivotLow.currentLevel: ${pivotLow.currentLevel}`);
+      console.log(`  swingLow.currentLevel: ${swingLow?.currentLevel}`);
+      console.log(`  prevClose: ${prevClose}, currentClose: ${currentClose}`);
+      console.log(`  prevClose >= pivotLow: ${prevClose >= pivotLow.currentLevel}`);
+      console.log(`  currentClose < pivotLow: ${currentClose < pivotLow.currentLevel}`);
+      console.log(`  pivotLow.crossed: ${pivotLow.crossed}`);
+      console.log(`  bearishBar: ${bearishBar}`);
+      console.log(`  extraCondition: ${extraCondition}`);
+    }
+
     if (
       prevClose >= pivotLow.currentLevel &&
       currentClose < pivotLow.currentLevel &&
       !pivotLow.crossed &&
       extraCondition
     ) {
+      // Trong Pine: nếu trend.bias == BULLISH thì là CHoCH, ngược lại là BOS
+      // Nhưng nếu trend.bias == 0 (neutral), breakout đầu tiên phải là BOS
       const tag = trend.bias === BULLISH ? 'CHoCH' : 'BOS';
       const direction = 'bearish';
+
+      // Debug: log khi tạo signal đầu tiên
+      if (signals.length === 0 && internal) {
+        const time = Array.isArray(times) ? times[currentIndex] : null;
+        const timeStr = time ? new Date(time).toISOString() : 'unknown';
+        console.log(`\n[DEBUG] Creating first signal:`);
+        console.log(`  Bar index: ${currentIndex}, Time: ${timeStr}`);
+        console.log(`  Type: ${tag}, Direction: ${direction}`);
+        console.log(`  Level: ${pivotLow.currentLevel}`);
+        console.log(`  pivotLow.barIndex: ${pivotLow.barIndex}`);
+        console.log(`  pivotLow.crossed before: ${pivotLow.crossed}`);
+        console.log(`  Trend before: ${trend.bias}`);
+        console.log(`  prevClose: ${prevClose}, currentClose: ${currentClose}`);
+        console.log(`  Crossunder: ${prevClose >= pivotLow.currentLevel && currentClose < pivotLow.currentLevel}`);
+      }
 
       signals.push({
         index: currentIndex,
@@ -467,6 +509,8 @@ function displayStructure({
         direction,
         level: pivotLow.currentLevel,
         internal,
+        trendBiasBefore: trend.bias, // Debug: trend bias trước khi update
+        passedExtraCondition: extraCondition, // Debug: extraCondition
       });
 
       pivotLow.crossed = true;
@@ -728,7 +772,10 @@ function calculateSMC({
 
   // Process từng bar (giống execution trong SMC.pine)
   // Bắt đầu từ bar đủ dữ liệu
-  const startIndex = Math.max(swingsLength, internalSize, equalHighsLowsLength);
+  // QUAN TRỌNG: internal structure size = 5, nhưng cần thêm bars để leg() có thể hoạt động
+  // leg(5) cần: high[5] và ta.highest(5), tức là cần 5 bars trước đó nữa
+  // Vậy cần ít nhất 5 + 5 = 10 bars
+  const startIndex = Math.max(swingsLength, internalSize * 2, equalHighsLowsLength);
   
   for (let i = startIndex; i < len; i++) {
     const currentHighs = h.slice(0, i + 1);

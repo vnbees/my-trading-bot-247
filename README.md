@@ -6,6 +6,9 @@ node startTrend.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d
 <!-- ema12:26 + adx -->
 node startSmartTrend.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
 
+<!-- AI Gemini -->
+node startGeminiBot.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
+
 <!-- backtest ema12:26 + adx -->
 node backtestSmartTrend.js --symbol=XRPUSDT_UMCBL --timeFrame=5m --lookbackDays=3 --capital=1 --leverage=10 --verbose --timezoneOffset=420 --fee=true --feeBasis=capital
  <!--kết quả chạy backtest có vẻ ~9-10% / tháng. tính theo tổng vốn chia 10 và mỗi lệnh là 10% tổng vốn  -->
