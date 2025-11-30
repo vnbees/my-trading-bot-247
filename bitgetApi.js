@@ -33,6 +33,215 @@ class BitgetApi {
   }
 
   /**
+   * Helper để convert productType sang v2 format
+   */
+  convertProductTypeToV2(productType) {
+    if (!productType) return 'USDT-FUTURES';
+    const pt = productType.toLowerCase();
+    if (pt === 'umcbl') return 'USDT-FUTURES';
+    if (pt === 'cmcbl') return 'COIN-FUTURES';
+    if (pt === 'dmcbl') return 'USDC-FUTURES';
+    return 'USDT-FUTURES'; // fallback
+  }
+
+  /**
+   * Helper để convert camelCase sang kebab-case
+   * Ví dụ: setLeverage -> set-leverage, singlePosition -> single-position
+   */
+  camelToKebab(str) {
+    return str.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  }
+
+  /**
+   * Helper để convert path từ v1 sang v2
+   * v2 sử dụng kebab-case cho endpoint names
+   * Mapping các endpoint đặc biệt:
+   * - setLeverage -> set-leverage
+   * - singlePosition -> single-position
+   * - allPosition -> all-position
+   * - placeOrder -> place-order
+   * - closePosition -> close-position
+   */
+  convertPathToV2(v1Path) {
+    // Convert /api/mix/v1/... to /api/v2/mix/...
+    let v2Path = v1Path.replace('/api/mix/v1/', '/api/v2/mix/');
+    
+    // Mapping đặc biệt cho các endpoint đã biết
+    const endpointMapping = {
+      'setLeverage': 'set-leverage',
+      'singlePosition': 'single-position',
+      'allPosition': 'all-position',
+      'placeOrder': 'place-order',
+      'closePosition': 'close-position',
+    };
+    
+    // Convert endpoint names từ camelCase sang kebab-case
+    const pathParts = v2Path.split('/');
+    const lastPart = pathParts[pathParts.length - 1];
+    
+    if (lastPart) {
+      // Thử mapping đặc biệt trước
+      if (endpointMapping[lastPart]) {
+        pathParts[pathParts.length - 1] = endpointMapping[lastPart];
+      } else if (/[a-z][A-Z]/.test(lastPart)) {
+        // Có camelCase trong phần cuối, convert sang kebab-case
+        pathParts[pathParts.length - 1] = this.camelToKebab(lastPart);
+      }
+      v2Path = pathParts.join('/');
+    }
+    
+    return v2Path;
+  }
+
+  /**
+   * Helper để tự động migrate endpoint từ v1 sang v2 khi cần
+   */
+  async requestWithV2Fallback({ method = 'GET', path, params = {}, body = {} }) {
+    try {
+      // Thử v1 trước
+      return await this.request({ method, path, params, body });
+    } catch (err) {
+      // Nếu v1 bị decommissioned, thử v2
+      if (err.isDecommissioned || (err.message && (err.message.includes('decommissioned') || err.message.includes('30032')))) {
+        console.warn(`[API] ⚠️ V1 endpoint ${path} decommissioned, migrating to v2...`);
+        
+        // Convert path sang v2
+        const v2Path = this.convertPathToV2(path);
+        
+        // Convert productType trong params sang v2 format nếu có
+        const v2Params = { ...params };
+        if (v2Params.productType) {
+          v2Params.productType = this.convertProductTypeToV2(v2Params.productType);
+        }
+        
+        // Với v2 GET requests, cần thêm productType nếu chưa có
+        if (method.toUpperCase() === 'GET' && !v2Params.productType) {
+          // Thử extract từ symbol
+          if (v2Params.symbol) {
+            const symbol = v2Params.symbol;
+            if (symbol.includes('_UMCBL')) {
+              v2Params.productType = 'USDT-FUTURES';
+            } else if (symbol.includes('_CMCBL')) {
+              v2Params.productType = 'COIN-FUTURES';
+            } else if (symbol.includes('_DMCBL')) {
+              v2Params.productType = 'USDC-FUTURES';
+            } else {
+              v2Params.productType = 'USDT-FUTURES'; // default
+            }
+          } else {
+            v2Params.productType = 'USDT-FUTURES'; // default
+          }
+        }
+        
+        // Với v2 GET requests, convert symbol và marginCoin format
+        if (method.toUpperCase() === 'GET') {
+          // Convert symbol sang lowercase và remove suffix
+          if (v2Params.symbol) {
+            let cleanSymbol = v2Params.symbol;
+            cleanSymbol = cleanSymbol.replace(/_[A-Z]+$/, ''); // Remove suffix
+            v2Params.symbol = cleanSymbol.toLowerCase();
+          }
+          
+          // Convert marginCoin sang uppercase
+          if (v2Params.marginCoin) {
+            v2Params.marginCoin = v2Params.marginCoin.toUpperCase();
+          }
+        }
+        
+        // Convert productType trong body sang v2 format nếu có (một số endpoint v2 dùng body)
+        const v2Body = { ...body };
+        if (v2Body.productType) {
+          v2Body.productType = this.convertProductTypeToV2(v2Body.productType);
+        }
+        
+        // Với v2, một số endpoint cần productType trong body thay vì params
+        // Thêm productType vào body nếu method là POST và chưa có trong body
+        if (method.toUpperCase() === 'POST' && v2Params.productType && !v2Body.productType) {
+          v2Body.productType = v2Params.productType;
+        }
+        
+        // Một số endpoint v2 (như setLeverage, placeOrder) yêu cầu productType trong body
+        // Nếu chưa có productType, thử extract từ symbol hoặc default
+        if (method.toUpperCase() === 'POST' && !v2Body.productType && body.symbol) {
+          // Extract productType từ symbol format: SYMBOL_UMCBL, SYMBOL_CMCBL, SYMBOL_DMCBL
+          const symbol = body.symbol;
+          if (symbol.includes('_UMCBL')) {
+            v2Body.productType = 'USDT-FUTURES';
+          } else if (symbol.includes('_CMCBL')) {
+            v2Body.productType = 'COIN-FUTURES';
+          } else if (symbol.includes('_DMCBL')) {
+            v2Body.productType = 'USDC-FUTURES';
+          } else {
+            // Default to USDT-FUTURES nếu không detect được
+            v2Body.productType = 'USDT-FUTURES';
+          }
+        }
+        
+        // Với v2, marginCoin phải được viết hoa
+        if (v2Body.marginCoin) {
+          v2Body.marginCoin = v2Body.marginCoin.toUpperCase();
+        }
+        
+        // Với v2, symbol phải lowercase
+        if (v2Body.symbol) {
+          // Remove suffix như _UMCBL, _CMCBL, _DMCBL để lấy symbol gốc
+          let cleanSymbol = v2Body.symbol;
+          cleanSymbol = cleanSymbol.replace(/_[A-Z]+$/, ''); // Remove suffix
+          v2Body.symbol = cleanSymbol.toLowerCase();
+        }
+        
+        // Với v2, convert side format từ v1 sang v2
+        // v1: open_long, open_short, close_long, close_short
+        // v2: side (buy/sell) + tradeSide (open/close)
+        if (v2Body.side) {
+          const sideV1 = v2Body.side;
+          if (sideV1 === 'open_long' || sideV1 === 'close_long') {
+            v2Body.side = 'buy';
+            v2Body.tradeSide = sideV1.startsWith('open') ? 'open' : 'close';
+          } else if (sideV1 === 'open_short' || sideV1 === 'close_short') {
+            v2Body.side = 'sell';
+            v2Body.tradeSide = sideV1.startsWith('open') ? 'open' : 'close';
+          }
+          // Nếu đã là format v2 (buy/sell), giữ nguyên
+        }
+        
+        // Với v2 place-order, cần thêm marginMode nếu chưa có
+        if (v2Path.includes('/order/place-order') && !v2Body.marginMode) {
+          // Default to isolated margin mode
+          v2Body.marginMode = 'isolated';
+        }
+        
+        // Với v2, một số parameter names khác:
+        // presetTakeProfitPrice -> presetStopSurplusPrice
+        if (v2Body.presetTakeProfitPrice && !v2Body.presetStopSurplusPrice) {
+          v2Body.presetStopSurplusPrice = v2Body.presetTakeProfitPrice;
+          delete v2Body.presetTakeProfitPrice;
+        }
+        
+        // presetStopLossPrice giữ nguyên trong v2
+        // timeInForceValue -> force (với giá trị khác: normal -> gtc)
+        if (v2Body.timeInForceValue && !v2Body.force) {
+          if (v2Body.timeInForceValue === 'normal') {
+            v2Body.force = 'gtc';
+          } else {
+            v2Body.force = v2Body.timeInForceValue;
+          }
+          delete v2Body.timeInForceValue;
+        }
+        
+        // Thử v2
+        try {
+          return await this.request({ method, path: v2Path, params: v2Params, body: v2Body });
+        } catch (v2Err) {
+          console.error(`[API] ❌ V2 endpoint ${v2Path} also failed: ${v2Err.message}`);
+          throw v2Err;
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Public/private request helper.
    */
   async request({ method = 'GET', path, params = {}, body = {} }) {
@@ -84,6 +293,15 @@ class BitgetApi {
             ? '\n💡 Gợi ý: API key của bạn có thể yêu cầu passphrase. Thử thêm --passphrase=YOUR_PASSPHRASE vào lệnh.'
             : '\n💡 Gợi ý: Kiểm tra lại passphrase, API key và secret key có đúng không.';
           throw new Error(`Bitget API error [${errorCode}]: ${errorMsg}${hint}`);
+        }
+        
+        // Xử lý lỗi V1 API decommissioned (30032)
+        // Note: Error này sẽ được catch bởi requestWithV2Fallback nếu có
+        if (errorCode === '30032' || errorCode === 30032 || (errorMsg && errorMsg.includes('decommissioned'))) {
+          const error = new Error(`Bitget API v1 has been decommissioned for endpoint: ${path}. Error: ${errorMsg}`);
+          error.isDecommissioned = true; // Flag để requestWithV2Fallback biết
+          error.v1Path = path;
+          throw error;
         }
         
         throw new Error(`Bitget API error [${errorCode}]: ${errorMsg}`);
@@ -189,16 +407,82 @@ class BitgetApi {
     }
   }
 
-  async getAccount(productType = 'umcbl', marginCoin = null) {
-    const params = { productType: productType.toLowerCase() };
-    if (marginCoin) {
-      params.marginCoin = marginCoin;
+  async getAccount(productType = 'umcbl', marginCoin = null, symbol = null) {
+    // API V2 format:
+    // - Path: /api/v2/mix/account/accounts (instead of /api/mix/v1/account/accounts)
+    // - productType must be uppercase: USDT-FUTURES, COIN-FUTURES, USDC-FUTURES
+    // - umcbl maps to USDT-FUTURES
+    
+    // Convert productType to v2 format
+    let v2ProductType = 'USDT-FUTURES'; // default
+    if (productType) {
+      const pt = productType.toLowerCase();
+      if (pt === 'umcbl') {
+        v2ProductType = 'USDT-FUTURES';
+      } else if (pt === 'cmcbl') {
+        v2ProductType = 'COIN-FUTURES';
+      } else if (pt === 'dmcbl') {
+        v2ProductType = 'USDC-FUTURES';
+      } else {
+        v2ProductType = 'USDT-FUTURES'; // fallback
+      }
     }
-    const result = await this.request({
-      method: 'GET',
-      path: '/api/mix/v1/account/accounts',
-      params,
-    });
+    
+    // Try v1 first (for backward compatibility), then v2 if decommissioned
+    let result;
+    try {
+      // Try v1 single account endpoint first if symbol provided
+      if (symbol && marginCoin) {
+        try {
+          result = await this.request({
+            method: 'GET',
+            path: '/api/mix/v1/account/account',
+            params: { symbol, marginCoin },
+          });
+          return result || {};
+        } catch (v1Err) {
+          // If v1 decommissioned, will fall through to v2
+          if (!v1Err.message || !v1Err.message.includes('decommissioned')) {
+            throw v1Err;
+          }
+        }
+      }
+      
+      // Try v1 accounts list
+      const v1Params = { 
+        productType: (productType || 'umcbl').toLowerCase()
+      };
+      if (marginCoin) {
+        v1Params.marginCoin = marginCoin;
+      }
+      
+      result = await this.request({
+        method: 'GET',
+        path: '/api/mix/v1/account/accounts',
+        params: v1Params,
+      });
+    } catch (v1Err) {
+      // If v1 fails with decommissioned, try v2
+      if (v1Err.message && (v1Err.message.includes('decommissioned') || v1Err.message.includes('30032'))) {
+        console.warn('[API] ⚠️ V1 API decommissioned, migrating to v2...');
+        
+        // Use v2 endpoint with uppercase productType
+        const v2Params = { 
+          productType: v2ProductType
+        };
+        if (marginCoin) {
+          v2Params.marginCoin = marginCoin;
+        }
+        
+        result = await this.request({
+          method: 'GET',
+          path: '/api/v2/mix/account/accounts',
+          params: v2Params,
+        });
+      } else {
+        throw v1Err;
+      }
+    }
     
     // Nếu trả về array, tìm account với marginCoin phù hợp
     if (Array.isArray(result)) {
@@ -214,7 +498,7 @@ class BitgetApi {
   }
 
   async setLeverage({ symbol, marginCoin, leverage, holdSide = 'long', positionMode = 'fixed' }) {
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'POST',
       path: '/api/mix/v1/account/setLeverage',
       body: {
@@ -265,7 +549,7 @@ class BitgetApi {
     
     console.log(`[API] Đặt lệnh: ${side} | Type: ${orderType} | Size: ${size} | Price: ${price || 'N/A'} | TP: ${presetTakeProfitPrice || 'N/A'} | SL: ${presetStopLossPrice || 'N/A'}`);
     
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'POST',
       path: '/api/mix/v1/order/placeOrder',
       body,
@@ -273,7 +557,7 @@ class BitgetApi {
   }
 
   async getPosition(symbol, marginCoin) {
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'GET',
       path: '/api/mix/v1/position/singlePosition',
       params: { symbol, marginCoin },
@@ -288,7 +572,7 @@ class BitgetApi {
     if (marginCoin) {
       params.marginCoin = marginCoin;
     }
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'GET',
       path: '/api/mix/v1/position/allPosition',
       params,
@@ -310,7 +594,7 @@ class BitgetApi {
     if (endTime) {
       params.endTime = endTime;
     }
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'GET',
       path: '/api/mix/v1/order/fills',
       params,
@@ -332,7 +616,7 @@ class BitgetApi {
     if (endTime) {
       params.endTime = endTime;
     }
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'GET',
       path: '/api/mix/v1/order/history',
       params,
@@ -340,7 +624,7 @@ class BitgetApi {
   }
 
   async getContracts(productType = 'umcbl') {
-    return this.request({
+    return this.requestWithV2Fallback({
       method: 'GET',
       path: '/api/mix/v1/market/contracts',
       params: { productType },
@@ -384,7 +668,7 @@ class BitgetApi {
   async closePosition({ symbol, marginCoin, holdSide, size }) {
     // Thử dùng endpoint closePosition trước
     try {
-      return await this.request({
+      return await this.requestWithV2Fallback({
         method: 'POST',
         path: '/api/mix/v1/order/closePosition',
         body: {

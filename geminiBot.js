@@ -109,9 +109,16 @@ class GeminiBot {
     
     while (this.isRunning) {
       try {
+        // Luôn gọi executeCycle (nó sẽ tự check position và xử lý)
         const nextCheckMinutes = await this.executeCycle();
         
-        // Sử dụng thời gian do AI đề xuất, với validation
+        // Nếu không có nextCheckMinutes (trường hợp đặc biệt), dùng mặc định
+        if (!nextCheckMinutes || isNaN(nextCheckMinutes)) {
+          console.warn('[GEMINI-BOT] ⚠️ Không có nextCheckMinutes từ executeCycle, sử dụng mặc định 60 phút');
+          nextCheckMinutes = 60; // Mặc định 1 giờ
+        }
+        
+        // Validate và hiển thị thời gian chờ
         const validatedMinutes = this.validateNextCheckTime(nextCheckMinutes);
         const waitMs = validatedMinutes * 60 * 1000;
         const nextRun = new Date(Date.now() + waitMs);
@@ -122,7 +129,10 @@ class GeminiBot {
           ? `${hours} giờ ${minutes} phút`
           : `${minutes} phút`;
         
-        console.log(`\n[GEMINI-BOT] ⏳ AI đề xuất đợi ${timeStr} (${validatedMinutes} phút)`);
+        const source = this.currentPosition && this.currentPosition.isActive 
+          ? 'Monitor position' 
+          : 'AI đề xuất';
+        console.log(`\n[GEMINI-BOT] ⏳ ${source}: Đợi ${timeStr} (${validatedMinutes} phút)`);
         console.log(`  Lần chạy tiếp theo: ${nextRun.toLocaleString('vi-VN')}\n`);
         await sleep(waitMs);
       } catch (err) {
@@ -179,8 +189,15 @@ class GeminiBot {
     const position = await this.getCurrentPosition();
     if (position) {
       console.log(`[GEMINI-BOT] ℹ️ Đang có position ${position.direction.toUpperCase()}, bỏ qua phân tích mới`);
+      console.log(`  - Entry: ${formatNumber(position.entryPrice)}`);
+      console.log(`  - SL: ${position.sl ? formatNumber(position.sl) : 'N/A'}`);
+      console.log(`  - TP: ${position.tp ? formatNumber(position.tp) : 'N/A'}`);
       this.currentPosition = position;
-      return;
+      
+      // Khi có position, check lại sau 30 phút để monitor
+      // (Position sẽ tự đóng khi đạt TP/SL qua exchange)
+      console.log(`[GEMINI-BOT] 📊 Sẽ monitor position và check lại sau 30 phút`);
+      return 30; // 30 phút để monitor position
     }
 
     // 1. Lấy dữ liệu đa khung thời gian từ Binance
@@ -233,6 +250,34 @@ class GeminiBot {
       : 60; // Fallback: 1 giờ nếu AI không trả về
     
     return nextCheckMinutes;
+  }
+
+  /**
+   * Monitor position hiện tại (kiểm tra trạng thái, có thể đóng sớm nếu cần)
+   */
+  async monitorPosition() {
+    if (!this.currentPosition || !this.currentPosition.isActive) {
+      return null;
+    }
+
+    try {
+      // Kiểm tra position từ API
+      const apiPosition = await this.getCurrentPosition();
+      
+      // Nếu không còn position (đã đóng tự động bởi TP/SL)
+      if (!apiPosition) {
+        console.log('[GEMINI-BOT] ✅ Position đã được đóng (có thể đạt TP/SL)');
+        this.currentPosition = null;
+        return null;
+      }
+      
+      // Position vẫn còn mở, tiếp tục monitor
+      this.currentPosition = apiPosition;
+      return 30; // Check lại sau 30 phút
+    } catch (err) {
+      console.error(`[GEMINI-BOT] ❌ Lỗi khi monitor position: ${err.message}`);
+      return 30; // Vẫn check lại sau 30 phút nếu có lỗi
+    }
   }
 
   /**
@@ -576,11 +621,30 @@ class GeminiBot {
       }
     }
 
-    // Thống kê giá
-    dataText += `\n\n=== THỐNG KÊ GIÁ (5m - 1 ngày) ===\n`;
-    dataText += `Giá cao nhất: ${highest.toFixed(this.priceDecimals)} USDT\n`;
-    dataText += `Giá thấp nhất: ${lowest.toFixed(this.priceDecimals)} USDT\n`;
-    dataText += `Biên độ: ${((highest - lowest) / currentPrice * 100).toFixed(2)}%\n\n`;
+    // Thống kê giá và xác định range
+    dataText += `\n\n=== THỐNG KÊ GIÁ VÀ RANGE (5m - 1 ngày) ===\n`;
+    dataText += `Giá cao nhất (Resistance): ${highest.toFixed(this.priceDecimals)} USDT\n`;
+    dataText += `Giá thấp nhất (Support): ${lowest.toFixed(this.priceDecimals)} USDT\n`;
+    dataText += `Biên độ range: ${((highest - lowest) / currentPrice * 100).toFixed(2)}%\n`;
+    
+    // Tính vị trí giá trong range (0% = support, 100% = resistance)
+    const rangePosition = ((currentPrice - lowest) / (highest - lowest) * 100).toFixed(1);
+    dataText += `Vị trí giá trong range: ${rangePosition}%`;
+    if (rangePosition < 20) {
+      dataText += ` → GẦN SUPPORT (cơ hội LONG trong sideways)\n`;
+    } else if (rangePosition > 80) {
+      dataText += ` → GẦN RESISTANCE (cơ hội SHORT trong sideways)\n`;
+    } else if (rangePosition >= 20 && rangePosition <= 80) {
+      dataText += ` → Ở GIỮA RANGE (chờ đến support/resistance)\n`;
+    } else {
+      dataText += `\n`;
+    }
+    
+    // Tính distance từ support/resistance
+    const distanceToSupport = ((currentPrice - lowest) / currentPrice * 100).toFixed(2);
+    const distanceToResistance = ((highest - currentPrice) / currentPrice * 100).toFixed(2);
+    dataText += `Khoảng cách đến Support: ${distanceToSupport}%\n`;
+    dataText += `Khoảng cách đến Resistance: ${distanceToResistance}%\n\n`;
 
     // 10 candles gần nhất
     dataText += `=== 10 CANDLES GẦN NHẤT (5m) ===\n`;
@@ -598,72 +662,107 @@ class GeminiBot {
    */
   async analyzeWithGemini(priceData, symbol) {
     const prompt = `
-Bạn là một chuyên gia phân tích kỹ thuật cryptocurrency chuyên nghiệp với nhiều năm kinh nghiệm.
+Bạn là một chuyên gia phân tích kỹ thuật cryptocurrency chuyên nghiệp với nhiều năm kinh nghiệm và kiến thức sâu rộng về các chiến lược giao dịch khác nhau. 
 
-Hãy phân tích DỮ LIỆU GIÁ VÀ CHỈ BÁO KỸ THUẬT sau đây từ Binance và đưa ra nhận định giao dịch:
+**ĐẶC ĐIỂM CỦA BẠN:**
+- Bạn có khả năng tìm ra cơ hội giao dịch trong MỌI tình huống thị trường, kể cả khi thị trường không rõ ràng, sideways, hoặc khó phân tích
+- Bạn biết cách điều chỉnh chiến lược phù hợp với từng loại thị trường
+- Bạn không bao giờ từ bỏ cơ hội - luôn tìm cách để giao dịch một cách an toàn và hiệu quả
+
+Hãy tự phân tích DỮ LIỆU GIÁ VÀ CHỈ BÁO KỸ THUẬT sau đây từ Binance và đưa ra nhận định giao dịch độc lập. **NHỚ RẰNG: BẠN PHẢI TÌM CÁCH ĐỂ GIAO DỊCH, KHÔNG DỄ DÀNG CHỌN "none"!**
 
 ${priceData}
 
-**HƯỚNG DẪN PHÂN TÍCH:**
+**NHIỆM VỤ CỦA BẠN - QUAN TRỌNG:**
 
-1. **XÁC ĐỊNH XU HƯỚNG TỔNG QUAN** (dựa trên khung thời gian lớn 4h, 1d):
-   - Sử dụng EMA, MACD, ADX để xác định xu hướng chính
-   - ADX >= 25: Xu hướng mạnh, có thể giao dịch theo trend
-   - ADX < 20: Thị trường đi ngang, cần cẩn thận
+Hãy tự tư duy và phân tích dữ liệu một cách toàn diện, và **LUÔN TÌM CÁCH ĐỂ GIAO DỊCH**:
 
-2. **TÍN HIỆU VÀO LỆNH** (dựa trên khung 5m, 1h):
-   - LONG: EMA bullish alignment (EMA10 > EMA20), MACD bullish, RSI không quá mua (< 70), giá trên EMA
-   - SHORT: EMA bearish alignment (EMA10 < EMA20), MACD bearish, RSI không quá bán (> 30), giá dưới EMA
-   - Xác nhận bằng Volume: OBV tăng cho LONG, OBV giảm cho SHORT
+1. **Phân tích đa khung thời gian**: Xem xét các chỉ báo từ khung 5m, 1h, 4h, 1d để có cái nhìn toàn diện về thị trường.
 
-3. **TÍNH TOÁN TP/SL**:
-   - Sử dụng ATR để tính SL: SL nên cách entry ít nhất 1-2x ATR
-   - TP: Áp dụng Risk:Reward ratio 1:2 hoặc 1:3
-   - Xem xét các mức kháng cự/hỗ trợ từ Bollinger Bands
+2. **Xác định bối cảnh thị trường**: 
+   - Thị trường đang trong xu hướng hay đi ngang?
+   - Mức độ biến động hiện tại (dựa trên ATR, Bollinger Bands width)
+   - Tâm lý thị trường (dựa trên RSI, Stochastic, Volume)
+   - **Lưu ý**: Ngay cả khi thị trường không rõ ràng, vẫn có cách để giao dịch!
 
-4. **ĐIỀU KIỆN KHÔNG VÀO LỆNH (action = "none")**:
-   - Xu hướng không rõ ràng (ADX thấp ở nhiều khung thời gian)
-   - RSI quá mua/quá bán cực độ (>80 hoặc <20)
-   - Tín hiệu mâu thuẫn giữa các khung thời gian
-   - Volume thấp (dưới trung bình)
+3. **Tự chọn chiến lược phù hợp - KHÔNG BAO GIỜ BỎ QUA CƠ HỘI**:
+   - Dựa trên bối cảnh thị trường bạn đã xác định, hãy tự quyết định chiến lược giao dịch tốt nhất
+   - **QUAN TRỌNG**: Trong mọi tình huống thị trường, luôn có cách để giao dịch:
+     * Thị trường có xu hướng → trend following
+     * Thị trường đi ngang → range trading, mean reversion
+     * Thị trường không rõ ràng → scalping, breakout trading, hoặc tìm khung thời gian nhỏ hơn
+     * Thị trường biến động mạnh → volatility trading
+     * Thị trường ít biến động → tìm kiếm setup nhỏ nhưng chắc chắn
+   - Hãy sáng tạo và tìm ra phương pháp phù hợp nhất cho tình huống hiện tại
+   - Chỉ chọn "none" khi THỰC SỰ không có bất kỳ cơ hội nào (rất hiếm)
 
-**QUAN TRỌNG: Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có text thêm. Format như sau:**
+4. **Tính toán Entry, TP, SL thông minh**:
+   - Entry: Dựa trên phân tích của bạn về điểm vào tối ưu
+   - TP: Tính toán dựa trên mục tiêu hợp lý (có thể là support/resistance, tỷ lệ R:R, hoặc phân tích kỹ thuật)
+   - SL: Đặt ở vị trí hợp lý để bảo vệ vốn (có thể dựa trên ATR, support/resistance, hoặc phân tích của bạn)
+   - **Lưu ý**: Ngay cả trong thị trường không rõ ràng, vẫn có thể đặt TP/SL hợp lý (có thể nhỏ hơn, R:R thấp hơn, nhưng vẫn có thể giao dịch)
+
+5. **Ước tính thời gian check tiếp theo**:
+   - Dựa trên phân tích của bạn về tình hình thị trường hiện tại
+   - Thị trường biến động mạnh, có tín hiệu sắp xuất hiện → check sớm hơn
+   - Thị trường ổn định, xu hướng rõ ràng → check muộn hơn
+   - Thị trường đi ngang, chờ đến support/resistance → check khi gần các mức đó
+   - Thị trường không rõ ràng → check thường xuyên hơn để nắm bắt cơ hội nhỏ
+
+**NGUYÊN TẮC QUAN TRỌNG:**
+
+- **LUÔN TÌM CÁCH GIAO DỊCH**: Ngay cả khi thị trường không rõ ràng, vẫn có cách để tìm cơ hội. Hãy sáng tạo!
+- **Linh hoạt**: Điều chỉnh chiến lược, TP/SL, và risk/reward ratio phù hợp với từng tình huống
+- **Không từ bỏ quá dễ dàng**: Chỉ chọn "none" khi thực sự không có bất kỳ setup nào có thể giao dịch
+- **Tận dụng mọi tín hiệu**: Ngay cả các tín hiệu nhỏ, yếu cũng có thể là cơ hội nếu bạn biết cách quản lý risk
+
+**OUTPUT FORMAT:**
+
+Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có text thêm. Format như sau:
 
 {
   "action": "long" hoặc "short" hoặc "none",
-  "entry": số (giá vào lệnh),
-  "takeProfit": số (mức chốt lời),
-  "stopLoss": số (mức cắt lỗ),
-  "reason": "Lý do chi tiết dựa trên các chỉ báo (tối đa 3 câu)",
+  "entry": số (giá vào lệnh cụ thể),
+  "takeProfit": số (mức chốt lời cụ thể),
+  "stopLoss": số (mức cắt lỗ cụ thể),
+  "reason": "Lý do chi tiết về phân tích và quyết định của bạn (giải thích chiến lược bạn chọn và tại sao)",
   "confidence": "high" hoặc "medium" hoặc "low",
   "nextCheckMinutes": số (số phút nên đợi trước khi phân tích lại, từ 15 đến 1440)
 }
 
-**Quy tắc:**
-- "action": 
-  - "long": Nếu có đủ tín hiệu bullish từ các chỉ báo
-  - "short": Nếu có đủ tín hiệu bearish từ các chỉ báo
-  - "none": Nếu không có tín hiệu rõ ràng hoặc tín hiệu mâu thuẫn
-- "entry": Giá cụ thể để vào lệnh (sử dụng giá hiện tại hoặc giá gần nhất từ khung 5m)
-- "takeProfit": Mức giá để chốt lời (tính dựa trên ATR và Risk:Reward 1:2 hoặc 1:3)
-- "stopLoss": Mức giá để cắt lỗ (tính dựa trên ATR, thường là 1-2x ATR từ entry)
-- "reason": Giải thích chi tiết dựa trên các chỉ báo bạn thấy (ví dụ: "EMA bullish alignment, MACD crossover bullish, RSI 45, ADX 28 cho thấy xu hướng tăng mạnh")
-- "confidence": 
-  - "high": Khi nhiều chỉ báo đồng thuận và xu hướng rõ ràng
-  - "medium": Khi có tín hiệu nhưng một số chỉ báo còn mâu thuẫn
-  - "low": Khi tín hiệu yếu hoặc thị trường đi ngang
+**Giải thích các field:**
 
-- "nextCheckMinutes": Số phút nên đợi trước khi phân tích lại (từ 15 đến 1440 phút = 24 giờ)
-  **QUAN TRỌNG**: Ước tính thời gian dựa trên:
-  - Biến động thị trường (ATR cao → check thường xuyên hơn, ATR thấp → check ít hơn)
-  - Độ tin cậy tín hiệu (confidence low → check lại sớm hơn để tìm cơ hội mới)
-  - Xu hướng thị trường (xu hướng mạnh → check ít hơn, thị trường đi ngang → check thường xuyên hơn)
-  - Có tín hiệu sắp xuất hiện (RSI gần vùng quá mua/quá bán, MACD sắp crossover → check sớm hơn)
-  - **Gợi ý**:
-    * Thị trường biến động mạnh + tín hiệu sắp xuất hiện: 15-30 phút
-    * Tín hiệu rõ ràng + confidence high: 60-120 phút
-    * Thị trường đi ngang + không có tín hiệu: 180-360 phút
-    * Xu hướng ổn định + confidence high: 480-720 phút
+- "action": Quyết định của bạn - "long", "short", hoặc "none" (chỉ chọn "none" khi THỰC SỰ không có bất kỳ cơ hội nào)
+- "entry": Giá vào lệnh cụ thể (dựa trên phân tích của bạn)
+- "takeProfit": Mức chốt lời cụ thể (tính toán dựa trên phân tích của bạn)
+- "stopLoss": Mức cắt lỗ cụ thể (tính toán dựa trên phân tích của bạn)
+- "reason": Giải thích chi tiết về:
+  * Bối cảnh thị trường bạn nhận định (trending, sideways, breakout, etc.)
+  * Chiến lược bạn chọn và tại sao
+  * Lý do cho Entry, TP, SL
+  * Các chỉ báo quan trọng bạn dựa vào
+- "confidence": Đánh giá độ tin cậy của bạn về quyết định này
+- "nextCheckMinutes": Thời gian bạn đề xuất đợi trước khi phân tích lại, dựa trên:
+  * Tình hình thị trường hiện tại
+  * Khả năng xuất hiện cơ hội mới
+  * Cần monitor position hay không
+  * (Từ 15 đến 1440 phút)
+
+**NGUYÊN TẮC QUAN TRỌNG:**
+
+1. **LUÔN TÌM CÁCH GIAO DỊCH**: Ngay cả khi thị trường không rõ ràng, sideways, hoặc khó phân tích, bạn PHẢI tìm ra phương pháp phù hợp để giao dịch. Một chuyên gia thực sự luôn có cách!
+
+2. **KHÔNG DỄ DÀNG CHỌN "none"**: Chỉ chọn "none" khi THỰC SỰ không có bất kỳ setup nào có thể giao dịch (trường hợp rất hiếm). Trong hầu hết trường hợp, luôn có một cách nào đó:
+   - Thị trường không rõ ràng → Tìm kiếm cơ hội nhỏ, scalping, hoặc giao dịch với TP/SL nhỏ hơn
+   - Thị trường đi ngang → Range trading, mean reversion
+   - Thị trường biến động mạnh → Volatility trading
+   - Thị trường yên lặng → Chờ breakout hoặc tìm setup nhỏ
+
+3. **Linh hoạt và sáng tạo**: Điều chỉnh chiến lược, TP/SL, và risk/reward ratio phù hợp với từng tình huống. Không có công thức cố định!
+
+4. **Tận dụng mọi tín hiệu**: Ngay cả các tín hiệu nhỏ, yếu cũng có thể là cơ hội nếu bạn biết cách quản lý risk hợp lý.
+
+5. **Hãy tự tư duy độc lập**: Không bị ràng buộc bởi bất kỳ quy tắc cứng nhắc nào. Phân tích dữ liệu và đưa ra quyết định tốt nhất dựa trên kiến thức và kinh nghiệm của bạn.
 
 **Chỉ trả về JSON, không có text hoặc markdown khác!**
 `;
@@ -896,7 +995,8 @@ ${priceData}
   async getEquity() {
     try {
       const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : 'umcbl';
-      const account = await this.api.getAccount(productType, this.config.marginCoin);
+      // Try with symbol first (single account endpoint), then fallback to productType
+      const account = await this.api.getAccount(productType, this.config.marginCoin, this.config.symbol);
       
       const equity = Number(
         account?.equity || 
