@@ -8,6 +8,7 @@
  * - Chạy mỗi 1 giờ một lần
  */
 
+require('dotenv').config();
 const axios = require('axios');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const {
@@ -19,7 +20,11 @@ const {
 } = require('./utils');
 
 // Google Gemini API Configuration
-const GOOGLE_API_KEY = 'AIzaSyBjtsO8MYNq8PMZH8dW_QkeAxL98Jexic0';
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || 'AIzaSyBjtsO8MYNq8PMZH8dW_QkeAxL98Jexic0';
+
+if (!GOOGLE_API_KEY || GOOGLE_API_KEY === '') {
+  throw new Error('GOOGLE_API_KEY không được tìm thấy. Vui lòng thêm vào file .env hoặc export biến môi trường.');
+}
 
 // Binance API
 const BINANCE_API_URL = 'https://api.binance.com/api/v3/klines';

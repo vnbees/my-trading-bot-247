@@ -20,6 +20,20 @@ Dependencies đã có sẵn trong `package.json`. Nếu chưa cài, chạy:
 npm install
 ```
 
+### Cấu hình
+
+Tạo file `.env` trong thư mục dự án và thêm Google API Key:
+
+```bash
+# Copy file mẫu
+cp .env.example .env
+
+# Hoặc tạo file .env và thêm:
+GOOGLE_API_KEY=your_google_api_key_here
+```
+
+**Lưu ý**: File `.env` đã được thêm vào `.gitignore` để không commit lên git.
+
 ### Chạy bot
 
 ```bash
@@ -87,7 +101,8 @@ node startGeminiBot.js \
 - Bot chỉ mở 1 position tại một thời điểm
 - Nếu đang có position, bot sẽ bỏ qua phân tích mới
 - Bot chạy mỗi 1 giờ một lần
-- API key của Gemini đã được hardcode trong code (có thể chỉnh trong `geminiBot.js`)
+- API key của Gemini được đọc từ file `.env` (biến môi trường `GOOGLE_API_KEY`)
+- Nếu không tìm thấy API key trong `.env`, code sẽ báo lỗi và dừng
 
 ## Bảo mật
 

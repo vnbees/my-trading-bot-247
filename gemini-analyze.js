@@ -4,13 +4,19 @@
  * Gửi tới Gemini AI để nhận định Long/Short, Entry, TP, SL
  */
 
+require('dotenv').config();
 const axios = require('axios');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // Google Gemini API Configuration
-const GOOGLE_API_KEY = 'AIzaSyBjtsO8MYNq8PMZH8dW_QkeAxL98Jexic0';
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || 'AIzaSyBjtsO8MYNq8PMZH8dW_QkeAxL98Jexic0';
+
+if (!GOOGLE_API_KEY || GOOGLE_API_KEY === '') {
+  console.error('❌ GOOGLE_API_KEY không được tìm thấy. Vui lòng thêm vào file .env');
+  process.exit(1);
+}
 
 // Binance API
 const BINANCE_API_URL = 'https://api.binance.com/api/v3/klines';
