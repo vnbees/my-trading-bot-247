@@ -95,7 +95,7 @@ async function main() {
   console.log(`  - Margin Coin: ${argv.margin}`);
   console.log(`  - Capital: ${capital > 0 ? `${capital} ${argv.margin} (số tiền vào lệnh)` : 'Tự động (dùng toàn bộ equity)'}`);
   console.log(`  - Leverage: ${argv.leverage}x`);
-  console.log(`  - Chạy mỗi: 1 giờ`);
+  console.log(`  - Thời gian chạy: AI tự điều chỉnh (15 phút - 24 giờ)`);
   console.log(`  - Nguồn dữ liệu: Binance 5m (1 ngày = 288 candles)`);
   console.log(`  - AI: Google Gemini`);
 
