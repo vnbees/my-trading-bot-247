@@ -191,10 +191,8 @@ class BitgetApi {
       }
     }
     
-    // Với v2 place-order, cần thêm marginMode nếu chưa có
-    if (v2Path.includes('/order/place-order') && !v2Body.marginMode) {
-      v2Body.marginMode = 'isolated';
-    }
+    // Với v2 place-order, marginMode sẽ được set từ placeOrder() function
+    // Không cần set default ở đây nữa
     
     // Convert parameter names
     if (v2Body.presetTakeProfitPrice && !v2Body.presetStopSurplusPrice) {
@@ -385,6 +383,18 @@ class BitgetApi {
     });
   }
 
+  async setMarginMode({ symbol, marginCoin, marginMode = 'crossed' }) {
+    return this.requestV2({
+      method: 'POST',
+      path: '/api/mix/v1/account/setMarginMode',
+      body: {
+        symbol,
+        marginCoin,
+        marginMode, // "crossed" hoặc "isolated"
+      },
+    });
+  }
+
   async placeOrder({
     symbol,
     marginCoin,
@@ -394,6 +404,7 @@ class BitgetApi {
     price,
     presetTakeProfitPrice,
     presetStopLossPrice,
+    marginMode = 'crossed', // Sử dụng "crossed" đúng theo API Bitget
   }) {
     // Xây dựng body, chỉ thêm TP/SL nếu có giá trị
     const body = {
@@ -403,6 +414,7 @@ class BitgetApi {
       side,
       orderType,
       timeInForceValue: 'normal',
+      marginMode: marginMode, // Set margin mode từ param
     };
     
     // Thêm price nếu là limit order
@@ -421,9 +433,9 @@ class BitgetApi {
       body.presetStopLossPrice = presetStopLossPrice.toString();
     }
     
-    console.log(`[API] Đặt lệnh: ${side} | Type: ${orderType} | Size: ${size} | Price: ${price || 'N/A'} | TP: ${presetTakeProfitPrice || 'N/A'} | SL: ${presetStopLossPrice || 'N/A'}`);
+    console.log(`[API] Đặt lệnh: ${side} | Type: ${orderType} | Size: ${size} | Margin: ${marginMode.toUpperCase()} | Price: ${price || 'N/A'} | TP: ${presetTakeProfitPrice || 'N/A'} | SL: ${presetStopLossPrice || 'N/A'}`);
     
-    return this.requestV2({
+    return await this.requestV2({
       method: 'POST',
       path: '/api/mix/v1/order/placeOrder',
       body,
