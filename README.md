@@ -1,13 +1,38 @@
 # my-trading-bot-247
 
-<!-- ema1226 + rsi -->
+## 🤖 Các Bot Trading Có Sẵn
+
+### 1. Trend Bot (EMA12/26 + RSI)
+Chiến lược dựa trên EMA crossover và RSI
+```bash
 node startTrend.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
+```
 
-<!-- ema12:26 + adx -->
+### 2. Smart Trend Bot (EMA12/26 + ADX)
+Chiến lược EMA với bộ lọc ADX để tránh sideways
+```bash
 node startSmartTrend.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
+```
 
-<!-- AI Gemini -->
+### 3. Gemini AI Bot (Tổng hợp)
+Bot sử dụng Google Gemini AI để phân tích đa chiều
+```bash
 node startGeminiBot.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
+```
+
+### 4. Price Action Bot (Mới!) 🔥
+**Bot chuyên về Price Action với Gemini AI**
+- Phân tích Candlestick Patterns (Hammer, Engulfing, Pin Bar, Doji, etc.)
+- Phát hiện Chart Patterns (H&S, Double Top/Bottom, Triangles, Wedges, Flags, etc.)
+- Xác định Support/Resistance, Swing High/Low
+- Market Structure analysis (HH, HL, LH, LL, BOS, ChoCh)
+- Risk:Reward tối thiểu 1:2
+
+```bash
+node startPriceActionBot.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD --symbol=XRPUSDT_UMCBL --capital=1 --leverage=10
+```
+
+📖 **Chi tiết:** Xem [PRICE_ACTION_BOT_README.md](./PRICE_ACTION_BOT_README.md)
 
 <!-- backtest ema12:26 + adx -->
 node backtestSmartTrend.js --symbol=XRPUSDT_UMCBL --timeFrame=5m --lookbackDays=3 --capital=1 --leverage=10 --verbose --timezoneOffset=420 --fee=true --feeBasis=capital

@@ -727,6 +727,7 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
   "stopLoss": số (mức cắt lỗ cụ thể),
   "reason": "Lý do chi tiết về phân tích và quyết định của bạn (giải thích chiến lược bạn chọn và tại sao)",
   "confidence": "high" hoặc "medium" hoặc "low",
+  "isTrending": true hoặc false (true = thị trường có xu hướng rõ ràng, false = thị trường sideways/không có xu hướng),
   "nextCheckMinutes": số (số phút nên đợi trước khi phân tích lại, từ 15 đến 1440)
 }
 
@@ -742,6 +743,9 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
   * Lý do cho Entry, TP, SL
   * Các chỉ báo quan trọng bạn dựa vào
 - "confidence": Đánh giá độ tin cậy của bạn về quyết định này
+- "isTrending": Đánh giá thị trường có xu hướng hay không:
+  * true = Thị trường có xu hướng rõ ràng (uptrend/downtrend mạnh, ADX > 25, EMA alignment rõ ràng)
+  * false = Thị trường sideways/không có xu hướng (ranging, choppy, ADX < 25, giá dao động trong range)
 - "nextCheckMinutes": Thời gian bạn đề xuất đợi trước khi phân tích lại, dựa trên:
   * Tình hình thị trường hiện tại
   * Khả năng xuất hiện cơ hội mới
@@ -819,12 +823,13 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
         return;
       }
 
-      const direction = analysis.action.toLowerCase(); // 'long' hoặc 'short'
+      let direction = analysis.action.toLowerCase(); // 'long' hoặc 'short'
       const entryPrice = parseFloat(analysis.entry) || klines[klines.length - 1].close;
-      const takeProfit = parseFloat(analysis.takeProfit);
-      const stopLoss = parseFloat(analysis.stopLoss);
+      let takeProfit = parseFloat(analysis.takeProfit);
+      let stopLoss = parseFloat(analysis.stopLoss);
       const reason = analysis.reason || 'Phân tích từ AI';
       const confidence = analysis.confidence || 'medium';
+      const isTrending = analysis.isTrending !== undefined ? analysis.isTrending : true;
 
       console.log(`[GEMINI-BOT] 📊 Tín hiệu từ AI:`);
       console.log(`  - Action: ${direction.toUpperCase()}`);
@@ -833,6 +838,51 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
       console.log(`  - SL: ${formatNumber(stopLoss)}`);
       console.log(`  - Lý do: ${reason}`);
       console.log(`  - Độ tin cậy: ${confidence}`);
+      console.log(`  - Thị trường có xu hướng: ${isTrending ? 'CÓ' : 'KHÔNG'}`);
+
+      // REVERSE LOGIC: Nếu thị trường KHÔNG có xu hướng → làm ngược lại AI
+      if (!isTrending) {
+        console.log('[GEMINI-BOT] 🔄 Thị trường SIDEWAYS → ĐẢO NGƯỢC lệnh:');
+        
+        // Đảo direction
+        const originalDirection = direction;
+        direction = direction === 'long' ? 'short' : 'long';
+        
+        // Đảo TP và SL
+        // Trong sideways: 
+        // - Nếu AI khuyến nghị LONG từ support → ta SHORT từ support (chờ giá giảm)
+        // - Nếu AI khuyến nghị SHORT từ resistance → ta LONG từ resistance (chờ giá tăng)
+        // Do đó cần swap TP ↔ SL
+        const originalTP = takeProfit;
+        const originalSL = stopLoss;
+        
+        // Tính TP và SL mới dựa trên khoảng cách từ entry
+        if (originalDirection === 'long') {
+          // AI khuyến nghị LONG (TP > entry, SL < entry)
+          // → Đảo thành SHORT (TP < entry, SL > entry)
+          const tpDistance = entryPrice - originalTP; // Khoảng cách TP (âm vì TP > entry)
+          const slDistance = originalSL - entryPrice; // Khoảng cách SL (âm vì SL < entry)
+          const rawTP = entryPrice + slDistance; // TP mới = entry + (khoảng cách SL cũ)
+          const rawSL = entryPrice - tpDistance; // SL mới = entry - (khoảng cách TP cũ)
+          // Round ngay để tránh floating point precision issue
+          takeProfit = this.priceTick ? roundToTick(rawTP, this.priceTick) : parseFloat(rawTP.toFixed(this.priceDecimals));
+          stopLoss = this.priceTick ? roundToTick(rawSL, this.priceTick) : parseFloat(rawSL.toFixed(this.priceDecimals));
+        } else {
+          // AI khuyến nghị SHORT (TP < entry, SL > entry)
+          // → Đảo thành LONG (TP > entry, SL < entry)
+          const tpDistance = originalTP - entryPrice; // Khoảng cách TP (âm vì TP < entry)
+          const slDistance = entryPrice - originalSL; // Khoảng cách SL (âm vì SL > entry)
+          const rawTP = entryPrice + slDistance; // TP mới = entry + (khoảng cách SL cũ)
+          const rawSL = entryPrice - tpDistance; // SL mới = entry - (khoảng cách TP cũ)
+          // Round ngay để tránh floating point precision issue
+          takeProfit = this.priceTick ? roundToTick(rawTP, this.priceTick) : parseFloat(rawTP.toFixed(this.priceDecimals));
+          stopLoss = this.priceTick ? roundToTick(rawSL, this.priceTick) : parseFloat(rawSL.toFixed(this.priceDecimals));
+        }
+        
+        console.log(`  - AI khuyến nghị: ${originalDirection.toUpperCase()} | TP: ${formatNumber(originalTP)} | SL: ${formatNumber(originalSL)}`);
+        console.log(`  - Bot thực thi: ${direction.toUpperCase()} | TP: ${formatNumber(takeProfit)} | SL: ${formatNumber(stopLoss)}`);
+        console.log(`  - Lý do: Thị trường sideways - đảo ngược tín hiệu AI`);
+      }
 
       // Validate giá
       if (!entryPrice || entryPrice <= 0) {
@@ -851,9 +901,9 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
       }
 
       // Round giá theo tick
-      const roundedEntry = this.priceTick ? roundToTick(entryPrice, this.priceTick) : entryPrice;
-      const roundedTP = this.priceTick ? roundToTick(takeProfit, this.priceTick) : takeProfit;
-      const roundedSL = this.priceTick ? roundToTick(stopLoss, this.priceTick) : stopLoss;
+      const roundedEntry = this.priceTick ? roundToTick(entryPrice, this.priceTick) : parseFloat(entryPrice.toFixed(this.priceDecimals));
+      const roundedTP = this.priceTick ? roundToTick(takeProfit, this.priceTick) : parseFloat(takeProfit.toFixed(this.priceDecimals));
+      const roundedSL = this.priceTick ? roundToTick(stopLoss, this.priceTick) : parseFloat(stopLoss.toFixed(this.priceDecimals));
 
       // Lấy equity
       const equity = await this.getEquity();
@@ -884,8 +934,8 @@ Bạn PHẢI trả về kết quả dưới dạng JSON hợp lệ, không có t
         size: lotSizeResult.size.toString(),
         side,
         orderType: 'market',
-        presetStopLossPrice: roundedSL.toString(),
-        presetTakeProfitPrice: roundedTP.toString(),
+        presetStopLossPrice: roundedSL.toFixed(this.priceDecimals),
+        presetTakeProfitPrice: roundedTP.toFixed(this.priceDecimals),
       });
 
       console.log(`[GEMINI-BOT] ✅ Đã mở position ${direction.toUpperCase()} thành công`);
