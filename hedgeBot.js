@@ -75,6 +75,10 @@ class HedgeBot {
     this.shortPosition = null;
     this.marketTrend = 'unclear'; // 'uptrend', 'downtrend', 'unclear'
     
+    // AI Analysis History (lưu trữ nhận định trước đó)
+    this.previousAnalyses = []; // Array of { timestamp, trend, confidence, reason, risk_assessment, suggestions }
+    this.maxHistorySize = 5; // Giữ tối đa 5 nhận định gần nhất
+    
     // Gemini AI
     this.genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
     this.geminiModel = null;
@@ -223,6 +227,7 @@ class HedgeBot {
 
   /**
    * Chu kỳ chạy chính
+   * Bot chỉ theo 100% đề xuất của AI, không có logic tự động
    */
   async executeCycle() {
     console.log('\n' + '='.repeat(60));
@@ -236,19 +241,11 @@ class HedgeBot {
     const currentPrice = await this.getCurrentPrice();
     console.log(`[HEDGE-BOT] 💵 Giá hiện tại: ${formatNumber(currentPrice)}`);
 
-    // 3. ✅ Phân tích xu hướng TRƯỚC (để check profit thông minh)
+    // 3. Phân tích xu hướng và nhận suggestions từ AI
     await this.analyzeTrendWithGemini();
 
-    // 4. ✅ Kiểm tra lợi nhuận THÔNG MINH (dựa trên xu hướng)
-    await this.checkProfitAndCloseIntelligent(currentPrice);
-
-    // 5. Quản lý positions dựa trên xu hướng
-    await this.managePositionsBasedOnTrend(currentPrice);
-
-    // 6. Đảm bảo luôn có 2 lệnh hedge nếu xu hướng không rõ
-    if (this.marketTrend === 'unclear') {
-      await this.ensureHedgePositions(currentPrice);
-    }
+    // 4. Bot chỉ execute AI suggestions, KHÔNG có logic tự động
+    // Tất cả decisions đều từ AI
   }
 
   /**
@@ -403,15 +400,38 @@ class HedgeBot {
         '1d': klines1d,
       });
 
-      // 4. Format dữ liệu cho Gemini
+      // 4. Lấy thông tin tài chính và positions hiện tại
+      const accountStatus = await this.getAccountStatus();
+
+      // Log thông tin số dư gửi cho AI
+      if (accountStatus) {
+        console.log('[HEDGE-BOT] 📊 Thông tin tài khoản gửi cho AI:');
+        console.log(`   💰 Equity: ${formatNumber(accountStatus.equity)} USDT`);
+        console.log(`   💵 Available: ${formatNumber(accountStatus.available)} USDT`);
+        console.log(`   📊 Margin used: ${formatNumber(accountStatus.totalMarginUsed)} USDT`);
+        console.log(`   🆓 Free margin: ${formatNumber(accountStatus.freeMargin)} USDT`);
+        console.log(`   📈 Margin level: ${accountStatus.marginLevel.toFixed(2)}%`);
+        console.log(`   💹 Unrealized PnL: ${accountStatus.totalUnrealizedPnL >= 0 ? '+' : ''}${formatNumber(accountStatus.totalUnrealizedPnL)} USDT`);
+        if (accountStatus.longPosition) {
+          const pos = accountStatus.longPosition;
+          console.log(`   🟢 LONG: Entry=${formatNumber(pos.entryPrice)} | Current=${formatNumber(pos.currentPrice)} | ROI=${pos.roiPercent >= 0 ? '+' : ''}${pos.roiPercent.toFixed(2)}% | Margin=${formatNumber(pos.marginUsed)} USDT`);
+        }
+        if (accountStatus.shortPosition) {
+          const pos = accountStatus.shortPosition;
+          console.log(`   🔴 SHORT: Entry=${formatNumber(pos.entryPrice)} | Current=${formatNumber(pos.currentPrice)} | ROI=${pos.roiPercent >= 0 ? '+' : ''}${pos.roiPercent.toFixed(2)}% | Margin=${formatNumber(pos.marginUsed)} USDT`);
+        }
+      }
+
+      // 5. Format dữ liệu cho Gemini (bao gồm cả account info)
       const priceData = this.formatPriceDataForGemini(
         klines5m,
         binanceSymbol,
         indicators,
-        priceActionAnalysis
+        priceActionAnalysis,
+        accountStatus
       );
 
-      // 5. Phân tích bằng Gemini
+      // 6. Phân tích bằng Gemini
       const analysis = await this.analyzeWithGemini(priceData, binanceSymbol);
       
       if (analysis && analysis.trend) {
@@ -419,6 +439,15 @@ class HedgeBot {
         console.log(`[HEDGE-BOT] ✅ Xu hướng thị trường: ${this.marketTrend.toUpperCase()}`);
         if (analysis.reason) {
           console.log(`   Lý do: ${analysis.reason}`);
+        }
+        
+        // Lưu analysis vào history
+        this.saveAnalysisToHistory(analysis);
+        
+        // Xử lý AI suggestions nếu có
+        if (analysis.suggestions && analysis.suggestions.length > 0) {
+          const currentPrice = klines5m[klines5m.length - 1].close;
+          await this.handleAISuggestions(analysis.suggestions, currentPrice);
         }
       }
     } catch (err) {
@@ -473,6 +502,258 @@ class HedgeBot {
     if (this.longPosition && this.shortPosition) {
       console.log('[HEDGE-BOT] ✅ Đã có đủ 2 lệnh hedge (LONG + SHORT)');
     }
+  }
+
+  /**
+   * Lấy thông tin tài chính và trạng thái positions hiện tại
+   */
+  async getAccountStatus() {
+    try {
+      const currentPrice = await this.getCurrentPrice();
+      const equity = await this.getEquity();
+      
+      // Lấy available balance
+      const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : 'umcbl';
+      const accountData = await this.api.getAccount(productType, this.config.marginCoin, this.config.symbol);
+      
+      const available = Number(
+        accountData?.available || 
+        accountData?.availableBalance || 
+        accountData?.availableEquity ||
+        equity
+      );
+      
+      // Tính toán thông tin positions
+      const leverage = this.config.leverage || 10;
+      let longInfo = null;
+      let shortInfo = null;
+      let totalMarginUsed = 0;
+      let totalUnrealizedPnL = 0;
+      
+      if (this.longPosition) {
+        const priceChange = ((currentPrice - this.longPosition.entryPrice) / this.longPosition.entryPrice) * 100;
+        const roiPercent = priceChange * leverage;
+        const notional = this.longPosition.size * this.longPosition.entryPrice;
+        const marginUsed = notional / leverage;
+        const unrealizedPnL = (roiPercent / 100) * marginUsed;
+        
+        longInfo = {
+          side: 'LONG',
+          entryPrice: this.longPosition.entryPrice,
+          currentPrice: currentPrice,
+          size: this.longPosition.size,
+          notional: notional,
+          marginUsed: marginUsed,
+          priceChangePercent: priceChange,
+          roiPercent: roiPercent,
+          unrealizedPnL: unrealizedPnL,
+        };
+        
+        totalMarginUsed += marginUsed;
+        totalUnrealizedPnL += unrealizedPnL;
+      }
+      
+      if (this.shortPosition) {
+        const priceChange = ((this.shortPosition.entryPrice - currentPrice) / this.shortPosition.entryPrice) * 100;
+        const roiPercent = priceChange * leverage;
+        const notional = this.shortPosition.size * this.shortPosition.entryPrice;
+        const marginUsed = notional / leverage;
+        const unrealizedPnL = (roiPercent / 100) * marginUsed;
+        
+        shortInfo = {
+          side: 'SHORT',
+          entryPrice: this.shortPosition.entryPrice,
+          currentPrice: currentPrice,
+          size: this.shortPosition.size,
+          notional: notional,
+          marginUsed: marginUsed,
+          priceChangePercent: priceChange,
+          roiPercent: roiPercent,
+          unrealizedPnL: unrealizedPnL,
+        };
+        
+        totalMarginUsed += marginUsed;
+        totalUnrealizedPnL += unrealizedPnL;
+      }
+      
+      const freeMargin = equity - totalMarginUsed;
+      const marginLevel = totalMarginUsed > 0 ? (equity / totalMarginUsed) * 100 : 0;
+      
+      return {
+        equity: equity,
+        available: available,
+        totalMarginUsed: totalMarginUsed,
+        freeMargin: freeMargin,
+        marginLevel: marginLevel,
+        totalUnrealizedPnL: totalUnrealizedPnL,
+        leverage: leverage,
+        longPosition: longInfo,
+        shortPosition: shortInfo,
+        configCapital: this.config.capital || null,
+      };
+    } catch (err) {
+      console.error(`[HEDGE-BOT] ❌ Lỗi khi lấy account status: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Xử lý suggestions từ AI
+   * @param {Array} suggestions - Array of suggestion objects từ AI
+   * @param {number} currentPrice - Giá hiện tại
+   */
+  async handleAISuggestions(suggestions, currentPrice) {
+    if (!suggestions || suggestions.length === 0) return;
+    
+    console.log('[HEDGE-BOT] 💡 AI Suggestions:');
+    
+    for (const suggestion of suggestions) {
+      const { action, reason, priority, capital, percentage, target_size } = suggestion;
+      
+      console.log(`   - ${action}: ${reason}`);
+      if (priority === 'critical') {
+        console.log(`     ⚠️ PRIORITY: CRITICAL - Cân nhắc xử lý ngay!`);
+      }
+      
+      try {
+        // Execute suggestions dựa trên action
+        switch (action) {
+          case 'open_long':
+            if (!this.longPosition) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Mở LONG position...`);
+              await this.openPosition('long', currentPrice);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest open_long nhưng đã có LONG position, bỏ qua`);
+            }
+            break;
+            
+          case 'open_short':
+            if (!this.shortPosition) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Mở SHORT position...`);
+              await this.openPosition('short', currentPrice);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest open_short nhưng đã có SHORT position, bỏ qua`);
+            }
+            break;
+            
+          case 'close_long':
+            if (this.longPosition) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Đóng LONG position...`);
+              await this.closePosition('long');
+              this.longPosition = null;
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest close_long nhưng không có LONG position, bỏ qua`);
+            }
+            break;
+            
+          case 'close_short':
+            if (this.shortPosition) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Đóng SHORT position...`);
+              await this.closePosition('short');
+              this.shortPosition = null;
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest close_short nhưng không có SHORT position, bỏ qua`);
+            }
+            break;
+            
+          case 'add_to_long':
+            if (capital && capital >= 1.0) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Thêm ${formatNumber(capital)} USDT vào LONG...`);
+              await this.addToPosition('long', currentPrice, capital);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest add_to_long nhưng capital (${capital}) < 1 USDT, bỏ qua`);
+            }
+            break;
+            
+          case 'add_to_short':
+            if (capital && capital >= 1.0) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Thêm ${formatNumber(capital)} USDT vào SHORT...`);
+              await this.addToPosition('short', currentPrice, capital);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest add_to_short nhưng capital (${capital}) < 1 USDT, bỏ qua`);
+            }
+            break;
+            
+          case 'partial_close_long':
+            if (percentage && percentage > 0 && percentage < 100) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Đóng ${percentage}% LONG...`);
+              await this.partialClose('long', percentage);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest partial_close_long nhưng percentage (${percentage}) không hợp lệ, bỏ qua`);
+            }
+            break;
+            
+          case 'partial_close_short':
+            if (percentage && percentage > 0 && percentage < 100) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Đóng ${percentage}% SHORT...`);
+              await this.partialClose('short', percentage);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest partial_close_short nhưng percentage (${percentage}) không hợp lệ, bỏ qua`);
+            }
+            break;
+            
+          case 'rebalance_long':
+            if (target_size && target_size >= 1.0) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Rebalance LONG về ${formatNumber(target_size)} USDT...`);
+              await this.rebalancePosition('long', target_size, currentPrice);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest rebalance_long nhưng target_size (${target_size}) < 1 USDT, bỏ qua`);
+            }
+            break;
+            
+          case 'rebalance_short':
+            if (target_size && target_size >= 1.0) {
+              console.log(`[HEDGE-BOT] 🤖 AI: Rebalance SHORT về ${formatNumber(target_size)} USDT...`);
+              await this.rebalancePosition('short', target_size, currentPrice);
+            } else {
+              console.log(`[HEDGE-BOT] ⚠️ AI suggest rebalance_short nhưng target_size (${target_size}) < 1 USDT, bỏ qua`);
+            }
+            break;
+            
+            
+          case 'reduce_margin':
+            // TODO: Implement reduce margin logic nếu cần
+            console.log(`[HEDGE-BOT] 💡 AI suggest reduce_margin - Chưa implement, cần manual review`);
+            break;
+            
+          case 'increase_caution':
+          case 'hold':
+            // Chỉ log, không cần action
+            console.log(`[HEDGE-BOT] 💡 AI suggest ${action} - Chỉ log, không cần action`);
+            break;
+            
+          default:
+            console.log(`[HEDGE-BOT] ⚠️ Unknown action: ${action}`);
+        }
+      } catch (err) {
+        console.error(`[HEDGE-BOT] ❌ Lỗi khi execute suggestion "${action}": ${err.message}`);
+        // Tiếp tục với suggestions khác, không throw
+      }
+    }
+  }
+
+  /**
+   * Lưu analysis vào history
+   */
+  saveAnalysisToHistory(analysis) {
+    const historyEntry = {
+      timestamp: new Date().toISOString(),
+      trend: analysis.trend,
+      confidence: analysis.confidence || 'medium',
+      reason: analysis.reason || '',
+      risk_assessment: analysis.risk_assessment || null,
+      suggestions: analysis.suggestions || [],
+    };
+    
+    // Thêm vào đầu array
+    this.previousAnalyses.unshift(historyEntry);
+    
+    // Giữ chỉ tối đa maxHistorySize entries
+    if (this.previousAnalyses.length > this.maxHistorySize) {
+      this.previousAnalyses = this.previousAnalyses.slice(0, this.maxHistorySize);
+    }
+    
+    console.log(`[HEDGE-BOT] 📝 Đã lưu analysis vào history (${this.previousAnalyses.length}/${this.maxHistorySize})`);
   }
 
   /**
@@ -559,6 +840,228 @@ class HedgeBot {
       console.log(`[HEDGE-BOT] ✅ Đã đóng ${side.toUpperCase()} thành công`);
     } catch (err) {
       console.error(`[HEDGE-BOT] ❌ Lỗi khi đóng ${side}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Thêm vào position hiện có (Pyramiding/Scaling In)
+   * @param {string} side - 'long' hoặc 'short'
+   * @param {number} currentPrice - Giá hiện tại
+   * @param {number} additionalCapital - Số USDT thêm vào (tối thiểu 1 USDT)
+   */
+  async addToPosition(side, currentPrice, additionalCapital) {
+    try {
+      const position = side === 'long' ? this.longPosition : this.shortPosition;
+      
+      if (!position) {
+        throw new Error(`Không có ${side} position để thêm vào. Sử dụng openPosition() thay vì.`);
+      }
+
+      // Kiểm tra minimum 1 USDT
+      if (additionalCapital < 1.0) {
+        throw new Error(`Capital thêm vào phải tối thiểu 1 USDT. Nhận được: ${additionalCapital} USDT`);
+      }
+
+      // Kiểm tra position hiện tại >= 1 USDT
+      const currentNotional = position.size * position.entryPrice;
+      const currentMargin = currentNotional / (this.config.leverage || 10);
+      
+      if (currentMargin < 1.0) {
+        throw new Error(`Position hiện tại chỉ có ${formatNumber(currentMargin)} USDT, cần tối thiểu 1 USDT`);
+      }
+
+      // Kiểm tra free margin
+      const equity = await this.getEquity();
+      const accountStatus = await this.getAccountStatus();
+      
+      if (accountStatus && accountStatus.freeMargin < additionalCapital) {
+        throw new Error(`Free margin không đủ! Cần ${formatNumber(additionalCapital)} USDT, chỉ có ${formatNumber(accountStatus.freeMargin)} USDT`);
+      }
+
+      console.log(`[HEDGE-BOT] ➕ Thêm vào ${side.toUpperCase()} position:`);
+      console.log(`  - Position hiện tại: ${formatNumber(position.size)} @ ${formatNumber(position.entryPrice)}`);
+      console.log(`  - Capital thêm: ${formatNumber(additionalCapital)} USDT`);
+      console.log(`  - Giá hiện tại: ${formatNumber(currentPrice)}`);
+
+      // Tính size mới cần mua
+      const lotSizeResult = this.calculateLotSize(currentPrice, additionalCapital);
+      
+      if (lotSizeResult.capitalTooLow) {
+        throw new Error(`Capital quá thấp để tính size!`);
+      }
+
+      const additionalSize = lotSizeResult.size;
+      console.log(`  - Size thêm: ${formatNumber(additionalSize)}`);
+
+      // Place order để thêm vào
+      const apiSide = side === 'long' ? 'open_long' : 'open_short';
+      await this.api.placeOrder({
+        symbol: this.config.symbol,
+        marginCoin: this.config.marginCoin,
+        size: additionalSize.toString(),
+        side: apiSide,
+        orderType: 'market',
+      });
+
+      // Tính average entry price
+      const oldNotional = position.size * position.entryPrice;
+      const newNotional = additionalSize * currentPrice;
+      const totalSize = position.size + additionalSize;
+      const averageEntryPrice = (oldNotional + newNotional) / totalSize;
+
+      // Update position tracking
+      const updatedPosition = {
+        holdSide: side,
+        entryPrice: averageEntryPrice,
+        size: totalSize,
+        leverage: this.config.leverage,
+      };
+
+      if (side === 'long') {
+        this.longPosition = updatedPosition;
+      } else {
+        this.shortPosition = updatedPosition;
+      }
+
+      console.log(`[HEDGE-BOT] ✅ Đã thêm vào ${side.toUpperCase()} thành công`);
+      console.log(`  - Average Entry: ${formatNumber(averageEntryPrice)}`);
+      console.log(`  - Total Size: ${formatNumber(totalSize)}`);
+      console.log(`  - Total Margin: ${formatNumber((totalSize * averageEntryPrice) / (this.config.leverage || 10))} USDT`);
+
+      await sleep(2000);
+    } catch (err) {
+      console.error(`[HEDGE-BOT] ❌ Lỗi khi thêm vào ${side}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Đóng một phần position (Partial Close)
+   * @param {string} side - 'long' hoặc 'short'
+   * @param {number} percentage - Phần trăm đóng (0-100), ví dụ: 50 = đóng 50%
+   */
+  async partialClose(side, percentage) {
+    try {
+      const position = side === 'long' ? this.longPosition : this.shortPosition;
+      
+      if (!position) {
+        throw new Error(`Không có ${side} position để đóng`);
+      }
+
+      // Validate percentage
+      if (percentage <= 0 || percentage >= 100) {
+        throw new Error(`Percentage phải trong khoảng 0-100. Nhận được: ${percentage}`);
+      }
+
+      const closeSize = position.size * (percentage / 100);
+      const remainingSize = position.size - closeSize;
+
+      // Kiểm tra position sau khi đóng vẫn >= 1 USDT
+      const currentNotional = position.size * position.entryPrice;
+      const currentMargin = currentNotional / (this.config.leverage || 10);
+      const remainingMargin = currentMargin * (1 - percentage / 100);
+
+      if (remainingMargin < 1.0) {
+        throw new Error(`Sau khi đóng ${percentage}%, position còn ${formatNumber(remainingMargin)} USDT (< 1 USDT tối thiểu). Hãy đóng ít hơn hoặc đóng toàn bộ.`);
+      }
+
+      console.log(`[HEDGE-BOT] 🔴 Đóng ${percentage}% ${side.toUpperCase()} position:`);
+      console.log(`  - Size hiện tại: ${formatNumber(position.size)}`);
+      console.log(`  - Size đóng: ${formatNumber(closeSize)}`);
+      console.log(`  - Size còn lại: ${formatNumber(remainingSize)}`);
+
+      // Đóng một phần
+      await this.api.closePosition({
+        symbol: this.config.symbol,
+        marginCoin: this.config.marginCoin,
+        holdSide: side,
+        size: closeSize.toString(),
+      });
+
+      // Update position tracking
+      const updatedPosition = {
+        holdSide: side,
+        entryPrice: position.entryPrice, // Entry price không đổi
+        size: remainingSize,
+        leverage: this.config.leverage,
+      };
+
+      if (side === 'long') {
+        this.longPosition = updatedPosition;
+      } else {
+        this.shortPosition = updatedPosition;
+      }
+
+      console.log(`[HEDGE-BOT] ✅ Đã đóng ${percentage}% ${side.toUpperCase()} thành công`);
+      console.log(`  - Size còn lại: ${formatNumber(remainingSize)}`);
+      console.log(`  - Margin còn lại: ${formatNumber(remainingMargin)} USDT`);
+
+      await sleep(2000);
+    } catch (err) {
+      console.error(`[HEDGE-BOT] ❌ Lỗi khi đóng một phần ${side}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Điều chỉnh size position về target (Rebalance)
+   * @param {string} side - 'long' hoặc 'short'
+   * @param {number} targetSize - Target size (USDT margin), tối thiểu 1 USDT
+   * @param {number} currentPrice - Giá hiện tại
+   */
+  async rebalancePosition(side, targetSize, currentPrice) {
+    try {
+      const position = side === 'long' ? this.longPosition : this.shortPosition;
+      
+      if (!position) {
+        // Nếu chưa có position và target >= 1 USDT, mở mới
+        if (targetSize >= 1.0) {
+          console.log(`[HEDGE-BOT] 📝 Chưa có ${side} position, mở mới với target ${formatNumber(targetSize)} USDT...`);
+          await this.openPosition(side, currentPrice);
+          return;
+        } else {
+          throw new Error(`Target size ${targetSize} USDT < 1 USDT tối thiểu`);
+        }
+      }
+
+      // Kiểm tra target >= 1 USDT
+      if (targetSize < 1.0) {
+        throw new Error(`Target size phải tối thiểu 1 USDT. Nhận được: ${targetSize} USDT`);
+      }
+
+      // Tính margin hiện tại
+      const currentNotional = position.size * position.entryPrice;
+      const currentMargin = currentNotional / (this.config.leverage || 10);
+      const targetNotional = targetSize * (this.config.leverage || 10);
+      const targetSizeContracts = targetNotional / currentPrice;
+
+      console.log(`[HEDGE-BOT] ⚖️ Rebalance ${side.toUpperCase()} position:`);
+      console.log(`  - Margin hiện tại: ${formatNumber(currentMargin)} USDT`);
+      console.log(`  - Target margin: ${formatNumber(targetSize)} USDT`);
+      console.log(`  - Size hiện tại: ${formatNumber(position.size)}`);
+      console.log(`  - Target size: ${formatNumber(targetSizeContracts)}`);
+
+      if (Math.abs(currentMargin - targetSize) < 0.01) {
+        console.log(`[HEDGE-BOT] ✅ Position đã đúng target, không cần điều chỉnh`);
+        return;
+      }
+
+      if (targetSize > currentMargin) {
+        // Cần thêm vào
+        const additionalCapital = targetSize - currentMargin;
+        console.log(`[HEDGE-BOT] ➕ Cần thêm ${formatNumber(additionalCapital)} USDT...`);
+        await this.addToPosition(side, currentPrice, additionalCapital);
+      } else {
+        // Cần đóng một phần
+        const percentageToClose = ((currentMargin - targetSize) / currentMargin) * 100;
+        console.log(`[HEDGE-BOT] 🔴 Cần đóng ${percentageToClose.toFixed(1)}%...`);
+        await this.partialClose(side, percentageToClose);
+      }
+
+      console.log(`[HEDGE-BOT] ✅ Đã rebalance ${side.toUpperCase()} về ${formatNumber(targetSize)} USDT`);
+    } catch (err) {
+      console.error(`[HEDGE-BOT] ❌ Lỗi khi rebalance ${side}: ${err.message}`);
       throw err;
     }
   }
@@ -799,7 +1302,7 @@ class HedgeBot {
     return result;
   }
 
-  formatPriceDataForGemini(klines, symbol, indicators = {}, priceActionAnalysis = {}) {
+  formatPriceDataForGemini(klines, symbol, indicators = {}, priceActionAnalysis = {}, accountStatus = null) {
     if (!klines || klines.length === 0) {
       return 'Không có dữ liệu giá.';
     }
@@ -810,6 +1313,158 @@ class HedgeBot {
     let dataText = `=== PHÂN TÍCH THỊ TRƯỜNG - ${symbol} ===\n\n`;
     dataText += `Giá hiện tại: ${currentPrice.toFixed(this.priceDecimals)} USDT\n`;
     dataText += `Thời gian: ${latest.time}\n\n`;
+
+    // Thêm thông tin tài chính và positions
+    if (accountStatus) {
+      dataText += `\n${'='.repeat(60)}\n`;
+      dataText += `THÔNG TIN TÀI KHOẢN & POSITIONS\n`;
+      dataText += `${'='.repeat(60)}\n`;
+      dataText += `💰 Tổng vốn (Equity): ${formatNumber(accountStatus.equity)} USDT\n`;
+      dataText += `💵 Khả dụng (Available): ${formatNumber(accountStatus.available)} USDT\n`;
+      dataText += `📊 Margin đã dùng: ${formatNumber(accountStatus.totalMarginUsed)} USDT\n`;
+      dataText += `🆓 Margin tự do: ${formatNumber(accountStatus.freeMargin)} USDT\n`;
+      dataText += `📈 Margin Level: ${accountStatus.marginLevel.toFixed(2)}%\n`;
+      dataText += `💹 Unrealized PnL: ${accountStatus.totalUnrealizedPnL >= 0 ? '+' : ''}${formatNumber(accountStatus.totalUnrealizedPnL)} USDT\n`;
+      dataText += `🎚️ Leverage: ${accountStatus.leverage}x\n`;
+      if (accountStatus.configCapital) {
+        dataText += `⚙️ Config capital: ${formatNumber(accountStatus.configCapital)} USDT\n`;
+      }
+      
+      dataText += `\n${'='.repeat(60)}\n`;
+      dataText += `CHIẾN LƯỢC HEDGE TRADING CỦA BOT\n`;
+      dataText += `${'='.repeat(60)}\n`;
+      
+      // Capital allocation
+      const capitalPerSide = accountStatus.configCapital ? accountStatus.configCapital / 2 : accountStatus.equity / 2;
+      
+      // Trạng thái hiện tại
+      dataText += `\n📌 TRẠNG THÁI HIỆN TẠI:\n`;
+      dataText += `   - Xu hướng thị trường: ${this.marketTrend.toUpperCase()}\n`;
+      dataText += `   - Bot đang ở mode: ${this.marketTrend === 'unclear' ? 'HEDGE (Long + Short)' : 'TREND FOLLOWING (Single position)'}\n`;
+      
+      dataText += `\n💰 PHÂN BỔ VỐN:\n`;
+      dataText += `   - Capital người dùng set: ${formatNumber(accountStatus.configCapital || accountStatus.equity)} USDT\n`;
+      dataText += `   - Capital mỗi lệnh (Long/Short): ${formatNumber(capitalPerSide)} USDT\n`;
+      dataText += `   - Leverage: ${accountStatus.leverage}x\n`;
+      dataText += `   - Profit threshold: ${PROFIT_THRESHOLD_PERCENT}% ROI (với leverage ${accountStatus.leverage}x)\n`;
+      
+      dataText += `\n⚠️ RÀNG BUỘC BẮT BUỘC (PHẢI TUÂN THỦ 100%):\n`;
+      dataText += `   - Mỗi lệnh PHẢI có TỐI THIỂU 1 USDT margin\n`;
+      dataText += `   - Khi mở lệnh mới: capital >= 1 USDT\n`;
+      dataText += `   - Khi suggest "add_to_long/add_to_short": capital thêm vào >= 1 USDT\n`;
+      dataText += `   - Khi suggest "partial_close": position sau khi đóng PHẢI >= 1 USDT\n`;
+      dataText += `   - Khi suggest "rebalance": target_size >= 1 USDT\n`;
+      dataText += `   - Khi đóng position: Phải đóng TẤT CẢ hoặc đảm bảo còn lại >= 1 USDT\n`;
+      dataText += `   - Position hiện tại < 1 USDT → KHÔNG thể add hoặc partial close\n`;
+      
+      dataText += `\n📊 CHIẾN LƯỢC THEO XU HƯỚNG:\n`;
+      dataText += `\n1️⃣ KHI XU HƯỚNG KHÔNG RÕ RÀNG (UNCLEAR/SIDEWAYS) - CHIẾN LƯỢC HEDGE:\n`;
+      dataText += `\n   🎯 MỤC TIÊU:\n`;
+      dataText += `      - Kiếm lợi nhuận từ biến động thị trường (sideways)\n`;
+      dataText += `      - Take profit nhanh khi đạt +${PROFIT_THRESHOLD_PERCENT}% ROI\n`;
+      dataText += `      - Bảo toàn vốn bằng cách hedge (Long + Short)\n`;
+      dataText += `\n   📋 QUY TẮC:\n`;
+      dataText += `      ✅ LUÔN duy trì 2 lệnh: LONG + SHORT (hedge)\n`;
+      dataText += `      ✅ Mỗi lệnh: ${formatNumber(capitalPerSide)} USDT margin (tối thiểu 1 USDT)\n`;
+      dataText += `      ✅ Khi lệnh nào đạt +${PROFIT_THRESHOLD_PERCENT}% ROI:\n`;
+      dataText += `         → Đóng lệnh đó\n`;
+      dataText += `         → Mở lại lệnh CÙNG CHIỀU với lệnh vừa đóng (với capital ${formatNumber(capitalPerSide)} USDT)\n`;
+      dataText += `         → Lệnh kia GIỮ NGUYÊN (không đóng, không mở lại)\n`;
+      dataText += `      ✅ Nếu thiếu 1 trong 2 lệnh (Long hoặc Short):\n`;
+      dataText += `         → Mở ngay lệnh thiếu với capital ${formatNumber(capitalPerSide)} USDT\n`;
+      dataText += `\n   🤖 AI PHẢI ĐỀ XUẤT:\n`;
+      dataText += `      - "open_long": Nếu chưa có LONG position\n`;
+      dataText += `      - "open_short": Nếu chưa có SHORT position\n`;
+      dataText += `      - "close_long": Nếu LONG đạt +${PROFIT_THRESHOLD_PERCENT}% ROI\n`;
+      dataText += `      - "close_short": Nếu SHORT đạt +${PROFIT_THRESHOLD_PERCENT}% ROI\n`;
+      dataText += `      - Sau khi close, phải suggest "open_long" hoặc "open_short" để mở lại\n`;
+      dataText += `      - KHÔNG suggest add/partial close trong unclear mode (chỉ mở/đóng đơn giản)\n`;
+      
+      dataText += `\n2️⃣ KHI XU HƯỚNG RÕ RÀNG (UPTREND/DOWNTREND) - CHIẾN LƯỢC TREND FOLLOWING:\n`;
+      dataText += `\n   🎯 MỤC TIÊU:\n`;
+      dataText += `      - Tối đa hóa lợi nhuận bằng cách follow trend\n`;
+      dataText += `      - Giữ position cùng xu hướng đến khi trend đảo chiều\n`;
+      dataText += `\n   📋 QUY TẮC:\n`;
+      dataText += `      ✅ Đóng NGAY lệnh ngược xu hướng (bất kể P/L)\n`;
+      dataText += `      ✅ Giữ lệnh cùng xu hướng (KHÔNG đóng dù lãi 5%, 10%, 15%...)\n`;
+      dataText += `      ✅ Chỉ đóng khi xu hướng đảo chiều hoặc unclear\n`;
+      dataText += `\n   🤖 AI PHẢI ĐỀ XUẤT:\n`;
+      dataText += `      - "close_long": Nếu trend DOWNTREND và có LONG\n`;
+      dataText += `      - "close_short": Nếu trend UPTREND và có SHORT\n`;
+      dataText += `      - "open_long": Nếu trend UPTREND và chưa có LONG\n`;
+      dataText += `      - "open_short": Nếu trend DOWNTREND và chưa có SHORT\n`;
+      dataText += `      - "add_to_long/add_to_short": Khi trend mạnh và position cùng chiều đang lãi\n`;
+      dataText += `      - "partial_close": Khi position lãi lớn và trend có dấu hiệu chậm lại\n`;
+      
+      dataText += `\n💡 LƯU Ý QUAN TRỌNG CHO AI:\n`;
+      dataText += `   - Bot KHÔNG có logic tự động, chỉ execute 100% suggestions của AI\n`;
+      dataText += `   - AI PHẢI đề xuất TẤT CẢ actions cần thiết (open, close, add, partial_close)\n`;
+      dataText += `   - Trong UNCLEAR mode: AI phải đảm bảo luôn có 2 lệnh (Long + Short)\n`;
+      dataText += `   - Trong TREND mode: AI phải đảm bảo chỉ có 1 lệnh cùng xu hướng\n`;
+      dataText += `   - Mỗi action PHẢI tuân thủ ràng buộc 1 USDT minimum\n`;
+      dataText += `   - Capital mỗi lệnh: ${formatNumber(capitalPerSide)} USDT (khi mở mới)\n`;
+      
+      dataText += `\n📍 VỊ THẾ ĐANG MỞ:\n`;
+      
+      if (accountStatus.longPosition) {
+        const pos = accountStatus.longPosition;
+        dataText += `\n  🟢 LONG Position:\n`;
+        dataText += `     Entry: ${formatNumber(pos.entryPrice)} USDT\n`;
+        dataText += `     Current: ${formatNumber(pos.currentPrice)} USDT\n`;
+        dataText += `     Size: ${formatNumber(pos.size)} contracts\n`;
+        dataText += `     Notional: ${formatNumber(pos.notional)} USDT\n`;
+        dataText += `     Margin: ${formatNumber(pos.marginUsed)} USDT\n`;
+        dataText += `     Price Δ: ${pos.priceChangePercent >= 0 ? '+' : ''}${pos.priceChangePercent.toFixed(2)}%\n`;
+        dataText += `     ROI: ${pos.roiPercent >= 0 ? '+' : ''}${pos.roiPercent.toFixed(2)}%\n`;
+        dataText += `     Unrealized PnL: ${pos.unrealizedPnL >= 0 ? '+' : ''}${formatNumber(pos.unrealizedPnL)} USDT\n`;
+      } else {
+        dataText += `\n  🟢 LONG Position: Không có\n`;
+      }
+      
+      if (accountStatus.shortPosition) {
+        const pos = accountStatus.shortPosition;
+        dataText += `\n  🔴 SHORT Position:\n`;
+        dataText += `     Entry: ${formatNumber(pos.entryPrice)} USDT\n`;
+        dataText += `     Current: ${formatNumber(pos.currentPrice)} USDT\n`;
+        dataText += `     Size: ${formatNumber(pos.size)} contracts\n`;
+        dataText += `     Notional: ${formatNumber(pos.notional)} USDT\n`;
+        dataText += `     Margin: ${formatNumber(pos.marginUsed)} USDT\n`;
+        dataText += `     Price Δ: ${pos.priceChangePercent >= 0 ? '+' : ''}${pos.priceChangePercent.toFixed(2)}%\n`;
+        dataText += `     ROI: ${pos.roiPercent >= 0 ? '+' : ''}${pos.roiPercent.toFixed(2)}%\n`;
+        dataText += `     Unrealized PnL: ${pos.unrealizedPnL >= 0 ? '+' : ''}${formatNumber(pos.unrealizedPnL)} USDT\n`;
+      } else {
+        dataText += `\n  🔴 SHORT Position: Không có\n`;
+      }
+    }
+
+    // Thêm lịch sử nhận định trước đó
+    if (this.previousAnalyses && this.previousAnalyses.length > 0) {
+      dataText += `\n${'='.repeat(60)}\n`;
+      dataText += `LỊCH SỬ NHẬN ĐỊNH TRƯỚC ĐÓ (${this.previousAnalyses.length} nhận định gần nhất)\n`;
+      dataText += `${'='.repeat(60)}\n`;
+      
+      this.previousAnalyses.forEach((analysis, index) => {
+        const timeAgo = index === 0 ? 'Vừa rồi' : `${index * 5} phút trước`;
+        dataText += `\n📅 ${timeAgo} (${new Date(analysis.timestamp).toLocaleString('vi-VN')}):\n`;
+        dataText += `   Trend: ${analysis.trend.toUpperCase()}\n`;
+        dataText += `   Confidence: ${analysis.confidence.toUpperCase()}\n`;
+        if (analysis.reason) {
+          dataText += `   Lý do: ${analysis.reason.substring(0, 150)}${analysis.reason.length > 150 ? '...' : ''}\n`;
+        }
+        if (analysis.risk_assessment) {
+          dataText += `   Risk: ${analysis.risk_assessment.overall_risk || 'N/A'}\n`;
+        }
+        if (analysis.suggestions && analysis.suggestions.length > 0) {
+          dataText += `   Suggestions: ${analysis.suggestions.map(s => s.action).join(', ')}\n`;
+        }
+      });
+      
+      dataText += `\n💡 LƯU Ý: So sánh với nhận định trước để phát hiện:\n`;
+      dataText += `   - Thay đổi xu hướng (trend reversal)\n`;
+      dataText += `   - Tăng/giảm confidence\n`;
+      dataText += `   - Tiến triển của risk level\n`;
+      dataText += `   - Suggestions đã được thực hiện hay chưa\n`;
+    }
 
     const timeframes = ['5m', '15m', '1h', '4h', '1d'];
     for (const tf of timeframes) {
@@ -857,15 +1512,17 @@ class HedgeBot {
 
   async analyzeWithGemini(priceData, symbol) {
     const prompt = `
-Bạn là chuyên gia phân tích thị trường cryptocurrency.
+Bạn là chuyên gia phân tích thị trường cryptocurrency và quản lý rủi ro.
 
-**DỮ LIỆU THỊ TRƯỜNG:**
+**DỮ LIỆU THỊ TRƯỜNG & TÀI KHOẢN:**
 
 ${priceData}
 
 **NHIỆM VỤ:**
 
-Phân tích dữ liệu trên và xác định xu hướng thị trường hiện tại.
+1. Phân tích xu hướng thị trường hiện tại
+2. Đánh giá tình trạng tài chính và positions
+3. Đưa ra suggestions về quản lý vốn và risk (nếu cần)
 
 **XU HƯỚNG CÓ 3 LOẠI:**
 
@@ -894,12 +1551,179 @@ Phân tích dữ liệu trên và xác định xu hướng thị trường hiệ
 - Cần nhiều xác nhận từ đa khung thời gian
 - Ưu tiên an toàn hơn là aggressive
 
+**SỬ DỤNG LỊCH SỬ NHẬN ĐỊNH TRƯỚC ĐÓ:**
+
+Nếu có "LỊCH SỬ NHẬN ĐỊNH TRƯỚC ĐÓ" trong dữ liệu, hãy:
+1. **So sánh trend hiện tại với trend trước:**
+   - Nếu trend thay đổi (ví dụ: unclear → uptrend) → Đây là tín hiệu quan trọng!
+   - Nếu trend giữ nguyên → Xác nhận xu hướng đang tiếp tục
+   - Nếu trend dao động (uptrend → unclear → uptrend) → Market đang choppy
+
+2. **Theo dõi confidence level:**
+   - Confidence tăng (low → medium → high) → Xu hướng đang mạnh lên
+   - Confidence giảm (high → medium → low) → Xu hướng đang yếu đi
+   - Confidence dao động → Market không rõ ràng
+
+3. **Phát hiện trend reversal:**
+   - Nếu 2-3 nhận định trước là "uptrend" nhưng hiện tại có dấu hiệu "downtrend" → Có thể đảo chiều!
+   - Nếu liên tục "unclear" → Market đang sideways, không nên force trend
+
+4. **Đánh giá risk progression:**
+   - Nếu risk từ "low" → "medium" → "high" → Cần action ngay!
+   - Nếu suggestions trước chưa được thực hiện và risk tăng → Priority cao hơn
+
+5. **Context-aware suggestions:**
+   - Nếu suggestion trước là "close_short" nhưng SHORT vẫn còn → Cần repeat với priority cao hơn
+   - Nếu trend đã thay đổi → Update suggestions cho phù hợp
+
+**CHIẾN LƯỢC THEO XU HƯỚNG - AI PHẢI ĐỀ XUẤT THEO ĐÂY:**
+
+**1️⃣ KHI XU HƯỚNG KHÔNG RÕ RÀNG (UNCLEAR/SIDEWAYS) - HEDGE STRATEGY:**
+
+AI PHẢI đề xuất theo chiến lược hedge:
+- ✅ LUÔN đảm bảo có 2 lệnh: LONG + SHORT
+- ✅ Mỗi lệnh: capital = (capital config) / 2 (xem trong data)
+- ✅ Khi lệnh nào đạt +5% ROI → Suggest "close_long" hoặc "close_short"
+- ✅ Sau khi close, PHẢI suggest "open_long" hoặc "open_short" để mở lại lệnh cùng chiều
+- ✅ Lệnh kia GIỮ NGUYÊN (không suggest close)
+- ✅ Nếu thiếu 1 trong 2 lệnh → Suggest "open_long" hoặc "open_short" ngay
+- ❌ KHÔNG suggest add/partial close trong unclear mode (chỉ mở/đóng đơn giản)
+
+**Ví dụ suggestions trong unclear mode:**
+- Chưa có LONG → Suggest "open_long"
+- Chưa có SHORT → Suggest "open_short"
+- LONG đạt +5% ROI → Suggest "close_long", sau đó "open_long" (mở lại)
+- SHORT đạt +5% ROI → Suggest "close_short", sau đó "open_short" (mở lại)
+
+**2️⃣ KHI XU HƯỚNG RÕ RÀNG (UPTREND/DOWNTREND) - TREND FOLLOWING:**
+
+AI PHẢI đề xuất theo chiến lược trend following:
+- ✅ Đóng NGAY lệnh ngược xu hướng → Suggest "close_long" (nếu downtrend) hoặc "close_short" (nếu uptrend)
+- ✅ Mở/giữ lệnh cùng xu hướng → Suggest "open_long" (nếu uptrend) hoặc "open_short" (nếu downtrend)
+- ✅ KHÔNG suggest close lệnh cùng xu hướng dù lãi 5%, 10%, 15%...
+- ✅ Có thể suggest "add_to_long/add_to_short" khi trend mạnh
+- ✅ Có thể suggest "partial_close" khi position lãi lớn và trend chậm lại
+
+**PHÂN TÍCH RỦI RO & SUGGESTIONS:**
+
+Dựa trên thông tin tài khoản và positions, đánh giá:
+- Margin level có an toàn không? (>200% là tốt, <150% là rủi ro)
+- Positions có cân đối không?
+- Có position nào đang lỗ quá lớn cần cắt lỗ?
+- Free margin có đủ để chịu đựng biến động?
+- Trong unclear mode: Đã có đủ 2 lệnh (Long + Short) chưa?
+- Trong trend mode: Lệnh có cùng xu hướng không?
+
+**⚠️ RÀNG BUỘC BẮT BUỘC (Xem trong "RÀNG BUỘC QUAN TRỌNG" ở data):**
+- Mỗi lệnh PHẢI có tối thiểu 1 USDT margin
+- Khi suggest "add_to_long/add_to_short": capital >= 1 USDT
+- Khi suggest "partial_close": đảm bảo position còn lại >= 1 USDT
+- Khi suggest "rebalance": target_size >= 1 USDT
+- Nếu position hiện tại < 1 USDT → KHÔNG thể add hoặc partial close
+- Luôn kiểm tra constraint này TRƯỚC KHI suggest!
+
+**SUGGESTIONS - BOT CHỈ THEO 100% ĐỀ XUẤT CỦA AI:**
+
+**⚠️ QUAN TRỌNG: Bot KHÔNG có logic tự động, chỉ execute suggestions của AI. AI PHẢI đề xuất TẤT CẢ actions cần thiết!**
+
+**Mở lệnh:**
+- "open_long": Mở LONG position mới (capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
+- "open_short": Mở SHORT position mới (capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
+
+**Đóng lệnh:**
+- "close_long": Đóng toàn bộ LONG position (nếu rủi ro cao, xu hướng đảo chiều, hoặc loss quá lớn)
+- "close_short": Đóng toàn bộ SHORT position (nếu rủi ro cao, xu hướng đảo chiều, hoặc loss quá lớn)
+- "partial_close_long": Đóng một phần LONG:
+  + Khi LONG đang LÃI và trend có dấu hiệu đảo → Lock profit (50-70%)
+  + Khi LONG đang LÃI lớn (+15%+) và trend chậm lại → Take partial profit (30-50%)
+  + ❌ KHÔNG nên dùng khi LONG đang LỖ và trend vẫn cùng chiều
+- "partial_close_short": Đóng một phần SHORT:
+  + Khi SHORT đang LÃI và trend có dấu hiệu đảo → Lock profit (50-70%)
+  + Khi SHORT đang LÃI lớn (+15%+) và trend chậm lại → Take partial profit (30-50%)
+  + ❌ KHÔNG nên dùng khi SHORT đang LỖ và trend vẫn cùng chiều
+
+**Thêm vào lệnh (Pyramiding/Scaling In/Averaging Down):**
+- "add_to_long": Thêm vào LONG position khi:
+  + Trend UPTREND và LONG đang LÃI → Pyramiding để maximize profit
+  + Trend UPTREND và LONG đang LỖ → Averaging down (giảm entry price trung bình)
+  + Free margin đủ và confidence cao
+- "add_to_short": Thêm vào SHORT position khi:
+  + Trend DOWNTREND và SHORT đang LÃI → Pyramiding để maximize profit
+  + Trend DOWNTREND và SHORT đang LỖ → Averaging down (giảm entry price trung bình)
+  + Free margin đủ và confidence cao
+
+**⚠️ LOGIC QUAN TRỌNG - KHI NÀO ADD vs PARTIAL CLOSE:**
+
+1. **Position đang LỖ nhưng trend VẪN CÙNG CHIỀU:**
+   - ✅ Nên: HOLD hoặc ADD (averaging down)
+   - ❌ KHÔNG nên: Partial close (sẽ lock loss)
+   - Lý do: Trend vẫn đúng, chỉ là entry timing chưa tốt. Averaging down sẽ giúp break-even nhanh hơn khi trend tiếp tục.
+
+2. **Position đang LỖ và trend ĐẢO CHIỀU:**
+   - ✅ Nên: CLOSE toàn bộ hoặc partial close (cut loss)
+   - ❌ KHÔNG nên: ADD (sẽ tăng loss)
+   - Lý do: Trend đã đảo, position đi ngược xu hướng mới.
+
+3. **Position đang LÃI và trend VẪN CÙNG CHIỀU:**
+   - ✅ Nên: HOLD hoặc ADD (pyramiding để maximize)
+   - ✅ Hoặc: Partial close một phần nhỏ (30-40%) để lock profit, giữ phần lớn để ride trend
+   - Lý do: Trend mạnh, nên tối đa hóa lợi nhuận.
+
+4. **Position đang LÃI nhưng trend CÓ DẤU HIỆU ĐẢO:**
+   - ✅ Nên: Partial close (50-70%) để lock profit
+   - ❌ KHÔNG nên: ADD (rủi ro cao)
+   - Lý do: Lock profit trước khi trend đảo chiều hoàn toàn.
+
+**VÍ DỤ CỤ THỂ:**
+- SHORT đang lỗ -10% ROI, trend DOWNTREND → ✅ Suggest "add_to_short" (averaging down)
+- SHORT đang lỗ -10% ROI, trend UPTREND (đảo chiều) → ✅ Suggest "close_short" hoặc "partial_close_short"
+- SHORT đang lãi +8% ROI, trend DOWNTREND → ✅ Suggest "add_to_short" (pyramiding) hoặc "hold"
+- SHORT đang lãi +8% ROI, trend UPTREND (đảo chiều) → ✅ Suggest "partial_close_short" (lock profit)
+
+**Điều chỉnh vị thế:**
+- "rebalance_long": Điều chỉnh size LONG về target (tăng/giảm để cân bằng với SHORT)
+- "rebalance_short": Điều chỉnh size SHORT về target (tăng/giảm để cân bằng với LONG)
+- "reduce_margin": Giảm margin/size của positions (nếu over-leveraged)
+
+**Khác:**
+- "increase_caution": Tăng cảnh giác (nếu thị trường choppy/nguy hiểm)
+- "hold": Giữ nguyên positions (an toàn)
+
+**LƯU Ý QUAN TRỌNG:**
+- Mỗi lệnh phải có TỐI THIỂU 1 USDT margin
+- Khi suggest "add_to_long" hoặc "add_to_short", phải đảm bảo:
+  + Position hiện tại >= 1 USDT
+  + Capital thêm vào >= 1 USDT
+  + Free margin đủ để add
+  + Trend rõ ràng và confidence cao
+- Khi suggest "partial_close", phải đảm bảo:
+  + Position sau khi đóng một phần vẫn >= 1 USDT
+  + Percentage đóng hợp lý (ví dụ: 30-70%)
+- Khi suggest "rebalance", phải đảm bảo:
+  + Target size >= 1 USDT
+  + Cân bằng giữa LONG và SHORT
+
 **OUTPUT (JSON only, no markdown):**
 
 {
   "trend": "uptrend" hoặc "downtrend" hoặc "unclear",
   "reason": "Giải thích chi tiết về xu hướng (cấu trúc thị trường, price action, indicators)",
-  "confidence": "high" hoặc "medium" hoặc "low"
+  "confidence": "high" hoặc "medium" hoặc "low",
+  "risk_assessment": {
+    "margin_health": "healthy" hoặc "warning" hoặc "critical",
+    "position_balance": "balanced" hoặc "unbalanced",
+    "overall_risk": "low" hoặc "medium" hoặc "high"
+  },
+  "suggestions": [
+    {
+      "action": "open_long" | "open_short" | "close_long" | "close_short" | "partial_close_long" | "partial_close_short" | "add_to_long" | "add_to_short" | "rebalance_long" | "rebalance_short" | "reduce_margin" | "increase_caution" | "hold",
+      "reason": "Lý do cụ thể",
+      "priority": "low" | "medium" | "high" | "critical",
+      "capital": <số USDT để add> (chỉ cho add_to_long/add_to_short, tối thiểu 1 USDT),
+      "percentage": <phần trăm để đóng> (chỉ cho partial_close, ví dụ: 50 = đóng 50%),
+      "target_size": <target size USDT> (chỉ cho rebalance, tối thiểu 1 USDT)
+    }
+  ]
 }
 
 Chỉ trả về JSON, KHÔNG có text hay markdown khác!
