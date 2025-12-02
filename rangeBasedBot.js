@@ -250,29 +250,59 @@ class RangeBasedBot {
       `[RANGE-BOT] 📊 TP sẽ được đặt dựa trên biên độ trung bình: ${rangeData.averageRangePercent.toFixed(4)}%`
     );
 
-    // Lấy cây nến trước đó (ví dụ: lúc 9h lấy nến 8h)
+    // Lấy cây nến trước đó (ví dụ: lúc 9h lấy nến 8h, lúc 0h lấy nến 23h)
     // Nến cuối cùng trong mảng có thể là nến đang hình thành (chưa đóng cửa)
-    // Nên lấy nến thứ 2 từ cuối (nến đã đóng cửa gần nhất)
-    // Nếu chỉ có 1 nến, lấy nến đó
+    // Logic: Tìm nến đã đóng cửa gần nhất (closeTime < nowTimestamp)
     // Lưu ý: Binance trả về nến theo thứ tự thời gian tăng dần
     // Nến cuối cùng là nến mới nhất, có thể chưa đóng cửa
-    let previousCandleIndex = klines.length >= 2 ? klines.length - 2 : klines.length - 1;
-    let previousCandle = klines[previousCandleIndex];
     
-    // Kiểm tra xem nến có đóng cửa chưa (closeTime < nowTimestamp)
     const nowTimestamp = Date.now();
-    let candleCloseTime = new Date(previousCandle.closeTime).getTime();
+    const nowDate = new Date(nowTimestamp);
+    console.log(
+      `[RANGE-BOT] 🕐 Thời gian hiện tại: ${nowDate.toLocaleString('vi-VN')} (${nowDate.getHours()}h)`
+    );
     
-    // Nếu nến chưa đóng cửa, lấy nến trước đó
-    while (candleCloseTime > nowTimestamp && previousCandleIndex > 0) {
-      previousCandleIndex--;
+    let previousCandleIndex = klines.length - 1; // Bắt đầu từ nến cuối cùng
+    let previousCandle = null;
+    
+    // Tìm nến đã đóng cửa gần nhất (lùi dần từ cuối lên)
+    for (let i = klines.length - 1; i >= 0; i--) {
+      const candle = klines[i];
+      const candleCloseTime = new Date(candle.closeTime).getTime();
+      const candleTime = new Date(candle.time);
+      const candleHour = candleTime.getHours();
+      
+      // Nếu nến đã đóng cửa (closeTime <= now), đây là nến cần lấy
+      if (candleCloseTime <= nowTimestamp) {
+        previousCandleIndex = i;
+        previousCandle = candle;
+        console.log(
+          `[RANGE-BOT] ✅ Tìm thấy nến đã đóng cửa: ${candleTime.toLocaleString('vi-VN')} (${candleHour}h) - CloseTime: ${new Date(candleCloseTime).toLocaleString('vi-VN')}`
+        );
+        break;
+      } else {
+        // Log các nến chưa đóng cửa (chỉ log 2-3 nến gần nhất)
+        if (i >= klines.length - 3) {
+          console.log(
+            `[RANGE-BOT] ⏳ Nến chưa đóng cửa: ${candleTime.toLocaleString('vi-VN')} (${candleHour}h) - CloseTime: ${new Date(candleCloseTime).toLocaleString('vi-VN')}`
+          );
+        }
+      }
+    }
+    
+    // Nếu không tìm thấy nến nào đã đóng cửa, lấy nến cuối cùng
+    if (!previousCandle) {
+      previousCandleIndex = klines.length - 1;
       previousCandle = klines[previousCandleIndex];
-      candleCloseTime = new Date(previousCandle.closeTime).getTime();
+      console.warn(
+        `[RANGE-BOT] ⚠️ Không tìm thấy nến đã đóng cửa, dùng nến cuối cùng (có thể chưa đóng cửa)`
+      );
     }
     
     const previousCandleTime = new Date(previousCandle.time);
+    const previousCandleHour = previousCandleTime.getHours();
     console.log(
-      `[RANGE-BOT] 📍 Cây nến được phân tích: ${previousCandleTime.toLocaleString('vi-VN')}`
+      `[RANGE-BOT] 📍 Cây nến được phân tích: ${previousCandleTime.toLocaleString('vi-VN')} (${previousCandleHour}h)`
     );
     console.log(
       `  O: ${previousCandle.open.toFixed(this.priceDecimals)}, H: ${previousCandle.high.toFixed(this.priceDecimals)}, L: ${previousCandle.low.toFixed(this.priceDecimals)}, C: ${previousCandle.close.toFixed(this.priceDecimals)}`
