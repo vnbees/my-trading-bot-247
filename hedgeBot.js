@@ -638,6 +638,18 @@ class HedgeBot {
             
           case 'close_long':
             if (this.longPosition) {
+              // Validation: Trong unclear mode, chỉ đóng khi LÃI +5% ROI
+              if (this.marketTrend === 'unclear') {
+                const leverage = this.config.leverage || 10;
+                const priceChangePercent = ((currentPrice - this.longPosition.entryPrice) / this.longPosition.entryPrice) * 100;
+                const roiPercent = priceChangePercent * leverage;
+                
+                if (roiPercent < PROFIT_THRESHOLD_PERCENT) {
+                  console.log(`[HEDGE-BOT] ❌ REJECT: AI suggest close_long trong unclear mode nhưng LONG đang ${roiPercent >= 0 ? 'LÃI' : 'LỖ'} ${roiPercent.toFixed(2)}% ROI (< ${PROFIT_THRESHOLD_PERCENT}%). Chỉ đóng khi LÃI +${PROFIT_THRESHOLD_PERCENT}% ROI!`);
+                  break;
+                }
+              }
+              
               console.log(`[HEDGE-BOT] 🤖 AI: Đóng LONG position...`);
               await this.closePosition('long');
               this.longPosition = null;
@@ -648,6 +660,18 @@ class HedgeBot {
             
           case 'close_short':
             if (this.shortPosition) {
+              // Validation: Trong unclear mode, chỉ đóng khi LÃI +5% ROI
+              if (this.marketTrend === 'unclear') {
+                const leverage = this.config.leverage || 10;
+                const priceChangePercent = ((this.shortPosition.entryPrice - currentPrice) / this.shortPosition.entryPrice) * 100;
+                const roiPercent = priceChangePercent * leverage;
+                
+                if (roiPercent < PROFIT_THRESHOLD_PERCENT) {
+                  console.log(`[HEDGE-BOT] ❌ REJECT: AI suggest close_short trong unclear mode nhưng SHORT đang ${roiPercent >= 0 ? 'LÃI' : 'LỖ'} ${roiPercent.toFixed(2)}% ROI (< ${PROFIT_THRESHOLD_PERCENT}%). Chỉ đóng khi LÃI +${PROFIT_THRESHOLD_PERCENT}% ROI!`);
+                  break;
+                }
+              }
+              
               console.log(`[HEDGE-BOT] 🤖 AI: Đóng SHORT position...`);
               await this.closePosition('short');
               this.shortPosition = null;
@@ -1366,18 +1390,22 @@ class HedgeBot {
       dataText += `\n   📋 QUY TẮC:\n`;
       dataText += `      ✅ LUÔN duy trì 2 lệnh: LONG + SHORT (hedge)\n`;
       dataText += `      ✅ Mỗi lệnh: ${formatNumber(capitalPerSide)} USDT margin (tối thiểu 1 USDT)\n`;
-      dataText += `      ✅ Khi lệnh nào đạt +${PROFIT_THRESHOLD_PERCENT}% ROI:\n`;
-      dataText += `         → Đóng lệnh đó\n`;
+      dataText += `      ✅ Khi lệnh nào đạt +${PROFIT_THRESHOLD_PERCENT}% ROI (LÃI):\n`;
+      dataText += `         → Đóng lệnh đó để take profit\n`;
       dataText += `         → Mở lại lệnh CÙNG CHIỀU với lệnh vừa đóng (với capital ${formatNumber(capitalPerSide)} USDT)\n`;
       dataText += `         → Lệnh kia GIỮ NGUYÊN (không đóng, không mở lại)\n`;
+      dataText += `      ⚠️ QUAN TRỌNG: CHỈ đóng khi LÃI +${PROFIT_THRESHOLD_PERCENT}% ROI, KHÔNG đóng khi LỖ!\n`;
       dataText += `      ✅ Nếu thiếu 1 trong 2 lệnh (Long hoặc Short):\n`;
       dataText += `         → Mở ngay lệnh thiếu với capital ${formatNumber(capitalPerSide)} USDT\n`;
       dataText += `\n   🤖 AI PHẢI ĐỀ XUẤT:\n`;
       dataText += `      - "open_long": Nếu chưa có LONG position\n`;
       dataText += `      - "open_short": Nếu chưa có SHORT position\n`;
-      dataText += `      - "close_long": Nếu LONG đạt +${PROFIT_THRESHOLD_PERCENT}% ROI\n`;
-      dataText += `      - "close_short": Nếu SHORT đạt +${PROFIT_THRESHOLD_PERCENT}% ROI\n`;
+      dataText += `      - "close_long": CHỈ khi LONG đạt +${PROFIT_THRESHOLD_PERCENT}% ROI (LÃI), KHÔNG đóng khi LỖ!\n`;
+      dataText += `      - "close_short": CHỈ khi SHORT đạt +${PROFIT_THRESHOLD_PERCENT}% ROI (LÃI), KHÔNG đóng khi LỖ!\n`;
+      dataText += `      - ⚠️ QUAN TRỌNG: Nếu ROI < ${PROFIT_THRESHOLD_PERCENT}% → Suggest "hold", KHÔNG suggest "close"!\n`;
+      dataText += `      - ⚠️ QUAN TRỌNG: Action và lý do PHẢI khớp nhau! Nếu suggest "close" thì lý do phải nói "đạt +${PROFIT_THRESHOLD_PERCENT}% ROI", KHÔNG nói "chưa đạt threshold"!\n`;
       dataText += `      - Sau khi close, phải suggest "open_long" hoặc "open_short" để mở lại\n`;
+      dataText += `      - Nếu lệnh đang LỖ hoặc ROI < ${PROFIT_THRESHOLD_PERCENT}%: GIỮ NGUYÊN, suggest "hold"!\n`;
       dataText += `      - KHÔNG suggest add/partial close trong unclear mode (chỉ mở/đóng đơn giản)\n`;
       
       dataText += `\n2️⃣ KHI XU HƯỚNG RÕ RÀNG (UPTREND/DOWNTREND) - CHIẾN LƯỢC TREND FOLLOWING:\n`;
@@ -1388,13 +1416,25 @@ class HedgeBot {
       dataText += `      ✅ Đóng NGAY lệnh ngược xu hướng (bất kể P/L)\n`;
       dataText += `      ✅ Giữ lệnh cùng xu hướng (KHÔNG đóng dù lãi 5%, 10%, 15%...)\n`;
       dataText += `      ✅ Chỉ đóng khi xu hướng đảo chiều hoặc unclear\n`;
-      dataText += `\n   🤖 AI PHẢI ĐỀ XUẤT:\n`;
-      dataText += `      - "close_long": Nếu trend DOWNTREND và có LONG\n`;
-      dataText += `      - "close_short": Nếu trend UPTREND và có SHORT\n`;
-      dataText += `      - "open_long": Nếu trend UPTREND và chưa có LONG\n`;
-      dataText += `      - "open_short": Nếu trend DOWNTREND và chưa có SHORT\n`;
-      dataText += `      - "add_to_long/add_to_short": Khi trend mạnh và position cùng chiều đang lãi\n`;
-      dataText += `      - "partial_close": Khi position lãi lớn và trend có dấu hiệu chậm lại\n`;
+      dataText += `\n   🤖 AI PHẢI ĐỀ XUẤT (QUAN TRỌNG: Check positions trước!):\n`;
+      dataText += `      \n`;
+      dataText += `      📈 KHI TREND = UPTREND:\n`;
+      dataText += `         - Nếu có SHORT (ngược chiều) → "close_short" NGAY! (CHỈ suggest nếu có SHORT position!)\n`;
+      dataText += `         - Nếu có LONG (cùng chiều) → "hold" hoặc "add_to_long", KHÔNG suggest "close_long"!\n`;
+      dataText += `         - Nếu chưa có LONG → "open_long"\n`;
+      dataText += `         - ⚠️ Nếu không có SHORT position → KHÔNG suggest "close_short"!\n`;
+      dataText += `      \n`;
+      dataText += `      📉 KHI TREND = DOWNTREND:\n`;
+      dataText += `         - Nếu có LONG (ngược chiều) → "close_long" NGAY! (CHỈ suggest nếu có LONG position!)\n`;
+      dataText += `         - Nếu có SHORT (cùng chiều) → "hold" hoặc "add_to_short", KHÔNG suggest "close_short"!\n`;
+      dataText += `         - Nếu chưa có SHORT → "open_short"\n`;
+      dataText += `         - ⚠️ Nếu không có LONG position → KHÔNG suggest "close_long"!\n`;
+      dataText += `      \n`;
+      dataText += `      ⚠️ LƯU Ý:\n`;
+      dataText += `         - KHÔNG suggest close lệnh CÙNG chiều với trend!\n`;
+      dataText += `         - KHÔNG suggest mở lệnh NGƯỢC chiều với trend!\n`;
+      dataText += `         - "add_to_long/add_to_short": Khi trend mạnh và position cùng chiều đang lãi\n`;
+      dataText += `         - "partial_close": Khi position cùng chiều lãi lớn và trend có dấu hiệu chậm lại\n`;
       
       dataText += `\n💡 LƯU Ý QUAN TRỌNG CHO AI:\n`;
       dataText += `   - Bot KHÔNG có logic tự động, chỉ execute 100% suggestions của AI\n`;
@@ -1583,26 +1623,77 @@ Nếu có "LỊCH SỬ NHẬN ĐỊNH TRƯỚC ĐÓ" trong dữ liệu, hãy:
 AI PHẢI đề xuất theo chiến lược hedge:
 - ✅ LUÔN đảm bảo có 2 lệnh: LONG + SHORT
 - ✅ Mỗi lệnh: capital = (capital config) / 2 (xem trong data)
-- ✅ Khi lệnh nào đạt +5% ROI → Suggest "close_long" hoặc "close_short"
-- ✅ Sau khi close, PHẢI suggest "open_long" hoặc "open_short" để mở lại lệnh cùng chiều
-- ✅ Lệnh kia GIỮ NGUYÊN (không suggest close)
 - ✅ Nếu thiếu 1 trong 2 lệnh → Suggest "open_long" hoặc "open_short" ngay
 - ❌ KHÔNG suggest add/partial close trong unclear mode (chỉ mở/đóng đơn giản)
 
-**Ví dụ suggestions trong unclear mode:**
-- Chưa có LONG → Suggest "open_long"
-- Chưa có SHORT → Suggest "open_short"
-- LONG đạt +5% ROI → Suggest "close_long", sau đó "open_long" (mở lại)
-- SHORT đạt +5% ROI → Suggest "close_short", sau đó "open_short" (mở lại)
+**⚠️ QUY TẮC ĐÓNG LỆNH TRONG UNCLEAR MODE (PHẢI TUÂN THỦ 100%):**
+
+**CHỈ ĐÓNG KHI:**
+- ✅ ROI >= +5.0% (LÃI, không phải LỖ)
+- ✅ Phải check ROI trong data "VỊ THẾ ĐANG MỞ" trước khi suggest
+- ✅ ROI phải >= 5.0% (ví dụ: 5.0%, 5.1%, 6.0%...)
+- ✅ ROI < 5.0% (ví dụ: 3.22%, 4.16%, 4.99%) → KHÔNG suggest close!
+
+**KHÔNG BAO GIỜ ĐÓNG KHI:**
+- ❌ ROI < +5.0% (ví dụ: 3.22%, 4.16%, 4.99%)
+- ❌ ROI < 0% (LỖ, ví dụ: -1.54%, -5.96%)
+- ❌ ROI = 0% (break-even)
+
+**SAU KHI ĐÓNG:**
+- ✅ PHẢI suggest "open_long" hoặc "open_short" để mở lại lệnh cùng chiều
+- ✅ Lệnh kia GIỮ NGUYÊN (không suggest close)
+
+**VÍ DỤ CỤ THỂ (PHẢI CHECK ROI TRƯỚC KHI SUGGEST):**
+
+✅ ĐÚNG:
+- SHORT ROI: +5.0% → Suggest "close_short" ✅
+- SHORT ROI: +5.1% → Suggest "close_short" ✅
+- SHORT ROI: +6.5% → Suggest "close_short" ✅
+- LONG ROI: +5.0% → Suggest "close_long" ✅
+
+❌ SAI (KHÔNG suggest close):
+- SHORT ROI: +3.22% → KHÔNG suggest close (3.22% < 5.0%) ❌
+- SHORT ROI: +4.16% → KHÔNG suggest close (4.16% < 5.0%) ❌
+- SHORT ROI: +4.99% → KHÔNG suggest close (4.99% < 5.0%) ❌
+- LONG ROI: -1.54% → KHÔNG suggest close (đang LỖ) ❌
+- SHORT ROI: -5.96% → KHÔNG suggest close (đang LỖ) ❌
+
+**QUY TRÌNH CHECK:**
+1. Đọc ROI từ "VỊ THẾ ĐANG MỞ" trong data
+2. So sánh: ROI >= 5.0%?
+3. Nếu YES → Suggest "close_long" hoặc "close_short"
+4. Nếu NO → KHÔNG suggest close, GIỮ NGUYÊN!
 
 **2️⃣ KHI XU HƯỚNG RÕ RÀNG (UPTREND/DOWNTREND) - TREND FOLLOWING:**
 
-AI PHẢI đề xuất theo chiến lược trend following:
-- ✅ Đóng NGAY lệnh ngược xu hướng → Suggest "close_long" (nếu downtrend) hoặc "close_short" (nếu uptrend)
-- ✅ Mở/giữ lệnh cùng xu hướng → Suggest "open_long" (nếu uptrend) hoặc "open_short" (nếu downtrend)
-- ✅ KHÔNG suggest close lệnh cùng xu hướng dù lãi 5%, 10%, 15%...
-- ✅ Có thể suggest "add_to_long/add_to_short" khi trend mạnh
-- ✅ Có thể suggest "partial_close" khi position lãi lớn và trend chậm lại
+**🔴 LOGIC QUAN TRỌNG - PHẢI HIỂU RÕ:**
+
+**KHI TREND = UPTREND (Xu hướng TĂNG):**
+- LONG = CÙNG CHIỀU với trend → ✅ GIỮ LONG, KHÔNG đóng!
+- SHORT = NGƯỢC CHIỀU với trend → ❌ ĐÓNG SHORT NGAY!
+- Nếu chưa có LONG → ✅ Suggest "open_long"
+- Nếu đã có LONG → ✅ Suggest "hold" hoặc "add_to_long"
+
+**KHI TREND = DOWNTREND (Xu hướng GIẢM):**
+- SHORT = CÙNG CHIỀU với trend → ✅ GIỮ SHORT, KHÔNG đóng!
+- LONG = NGƯỢC CHIỀU với trend → ❌ ĐÓNG LONG NGAY!
+- Nếu chưa có SHORT → ✅ Suggest "open_short"
+- Nếu đã có SHORT → ✅ Suggest "hold" hoặc "add_to_short"
+
+**⚠️ QUY TẮC BẮT BUỘC:**
+- ✅ Đóng NGAY lệnh NGƯỢC xu hướng:
+  + Trend DOWNTREND + có LONG → Suggest "close_long" (LONG ngược chiều)
+  + Trend UPTREND + có SHORT → Suggest "close_short" (SHORT ngược chiều)
+- ✅ GIỮ lệnh CÙNG xu hướng (KHÔNG suggest close):
+  + Trend DOWNTREND + có SHORT → Suggest "hold" (SHORT cùng chiều)
+  + Trend UPTREND + có LONG → Suggest "hold" (LONG cùng chiều)
+- ✅ Mở lệnh CÙNG xu hướng nếu chưa có:
+  + Trend UPTREND + chưa có LONG → Suggest "open_long"
+  + Trend DOWNTREND + chưa có SHORT → Suggest "open_short"
+- ❌ KHÔNG BAO GIỜ suggest close lệnh CÙNG xu hướng dù lãi 5%, 10%, 15%...
+- ❌ KHÔNG BAO GIỜ suggest mở lệnh NGƯỢC xu hướng!
+- ✅ Có thể suggest "add_to_long/add_to_short" khi trend mạnh và position cùng chiều đang lãi
+- ✅ Có thể suggest "partial_close" khi position cùng chiều lãi lớn và trend có dấu hiệu chậm lại
 
 **PHÂN TÍCH RỦI RO & SUGGESTIONS:**
 
@@ -1626,13 +1717,109 @@ Dựa trên thông tin tài khoản và positions, đánh giá:
 
 **⚠️ QUAN TRỌNG: Bot KHÔNG có logic tự động, chỉ execute suggestions của AI. AI PHẢI đề xuất TẤT CẢ actions cần thiết!**
 
+**🔴 QUY TẮC ĐÓNG LỆNH TRONG UNCLEAR MODE (PHẢI CHECK TRƯỚC KHI SUGGEST):**
+
+**BƯỚC 1: Đọc ROI từ "VỊ THẾ ĐANG MỞ" trong data**
+- Tìm "ROI: +X.XX%" hoặc "ROI: -X.XX%" trong position info
+- X.XX là số ROI (ví dụ: +3.22%, -1.54%, +5.0%)
+
+**BƯỚC 2: So sánh với threshold +5.0%**
+- Nếu ROI >= +5.0% (ví dụ: 5.0%, 5.1%, 6.5%) → ✅ ĐƯỢC suggest close
+- Nếu ROI < +5.0% (ví dụ: 1.68%, 3.22%, 4.16%, 4.99%) → ❌ KHÔNG suggest close
+- Nếu ROI < 0% (LỖ, ví dụ: -1.54%, -5.96%) → ❌ KHÔNG suggest close
+
+**BƯỚC 3: Suggest action (QUAN TRỌNG: Action phải khớp với lý do!)**
+- ✅ ROI >= 5.0% → Suggest "close_long" hoặc "close_short" với lý do "đạt +5.0% ROI, đóng để take profit"
+- ❌ ROI < 5.0% → Suggest "hold" với lý do "ROI +X.XX% < 5%, chưa đạt threshold, giữ nguyên"
+- ⚠️ KHÔNG BAO GIỜ suggest "close" nhưng lý do lại nói "chưa đạt threshold" hoặc "không đóng" - Đây là mâu thuẫn!
+- ⚠️ KHÔNG BAO GIỜ suggest "close" khi ROI < 5.0% - Chỉ suggest "hold"!
+
+**VÍ DỤ CỤ THỂ:**
+
+Ví dụ 1 - ROI < 5.0% (1.68%):
+Data: "SHORT: Entry=2.0189 | Current=2.0155 | ROI=+1.68%"
+Check: 1.68% < 5.0% → KHÔNG suggest "close_short"
+Action: Suggest "hold" với lý do "SHORT ROI +1.68% < 5%, chưa đạt threshold, giữ nguyên"
+❌ SAI: Suggest "close_short" với lý do "chưa đạt threshold" - Mâu thuẫn!
+
+Ví dụ 2 - ROI < 5.0% (2.18%):
+Data: "SHORT: Entry=2.0152 | Current=2.0108 | ROI=+2.18%"
+Check: 2.18% < 5.0% → KHÔNG suggest "close_short"
+Action: Suggest "hold" với lý do "SHORT ROI +2.18% < 5%, chưa đạt threshold, giữ nguyên"
+❌ SAI: Suggest "close_short" với lý do "SHORT ROI +2.18% < 5%, chưa đạt threshold" - Mâu thuẫn! Nếu chưa đạt thì không suggest close!
+
+Ví dụ 3 - ROI < 5.0% (3.22%):
+Data: "SHORT: Entry=2.0189 | Current=2.0124 | ROI=+3.22%"
+Check: 3.22% < 5.0% → KHÔNG suggest "close_short"
+Action: Suggest "hold" với lý do "SHORT ROI +3.22% < 5%, chưa đạt threshold, giữ nguyên"
+
+Ví dụ 3 - ROI >= 5.0%:
+Data: "SHORT: Entry=2.0189 | Current=2.0000 | ROI=+5.0%"
+Check: 5.0% >= 5.0% → Suggest "close_short"
+Action: Suggest "close_short" với lý do "SHORT đạt +5.0% ROI, đóng để take profit", sau đó "open_short"
+
+**🔴 QUY TẮC MỞ LỆNH (PHẢI CHECK TRƯỚC KHI SUGGEST):**
+
+**BƯỚC 1: Đọc "VỊ THẾ ĐANG MỞ" trong data**
+- Tìm phần "🟢 LONG Position:" hoặc "🔴 SHORT Position:"
+- Nếu có thông tin chi tiết (Entry, Current, Size...) → Position ĐANG MỞ
+- Nếu có "Không có" → Position CHƯA MỞ
+
+**BƯỚC 2: Check trước khi suggest "open_long" hoặc "open_short"**
+- ✅ Suggest "open_long" CHỈ KHI: "LONG Position: Không có" (chưa có LONG)
+- ✅ Suggest "open_short" CHỈ KHI: "SHORT Position: Không có" (chưa có SHORT)
+- ❌ KHÔNG suggest "open_long" nếu đã có LONG position (có thông tin Entry, Size...)
+- ❌ KHÔNG suggest "open_short" nếu đã có SHORT position (có thông tin Entry, Size...)
+
+**BƯỚC 3: Ví dụ cụ thể**
+
+✅ ĐÚNG:
+- Data: "🟢 LONG Position: Không có" → Suggest "open_long" ✅
+- Data: "🔴 SHORT Position: Không có" → Suggest "open_short" ✅
+- Data: "🟢 LONG Position: Entry=2.0155, Size=17..." → KHÔNG suggest "open_long" (đã có) ✅
+- Data: "🔴 SHORT Position: Entry=2.0189, Size=17..." → KHÔNG suggest "open_short" (đã có) ✅
+
+❌ SAI (KHÔNG suggest open):
+- Data: "🟢 LONG Position: Entry=2.0155, Size=17..." → Suggest "open_long" ❌ (ĐÃ CÓ LONG!)
+- Data: "🔴 SHORT Position: Entry=2.0189, Size=17..." → Suggest "open_short" ❌ (ĐÃ CÓ SHORT!)
+
+**⚠️ QUAN TRỌNG:**
+- PHẢI check "VỊ THẾ ĐANG MỞ" TRƯỚC KHI suggest "open_long" hoặc "open_short"
+- Nếu đã có position → Suggest "hold" hoặc action khác (add, partial_close), KHÔNG suggest "open"!
+- Nếu không chắc chắn → Suggest "hold" thay vì "open"!
+
 **Mở lệnh:**
-- "open_long": Mở LONG position mới (capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
-- "open_short": Mở SHORT position mới (capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
+- "open_long": Mở LONG position mới (CHỈ KHI chưa có LONG, capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
+- "open_short": Mở SHORT position mới (CHỈ KHI chưa có SHORT, capital = capital mỗi lệnh từ config, tối thiểu 1 USDT)
+
+**🔴 QUY TẮC ĐÓNG LỆNH (PHẢI CHECK POSITIONS TRƯỚC KHI SUGGEST):**
+
+**BƯỚC 1: Đọc "VỊ THẾ ĐANG MỞ" trong data**
+- Tìm phần "🟢 LONG Position:" hoặc "🔴 SHORT Position:"
+- Nếu có thông tin chi tiết (Entry, Current, Size...) → Position ĐANG MỞ
+- Nếu có "Không có" → Position CHƯA MỞ
+
+**BƯỚC 2: Check trước khi suggest "close_long" hoặc "close_short"**
+- ✅ Suggest "close_long" CHỈ KHI: "🟢 LONG Position:" có thông tin (Entry, Size...) - Position ĐANG MỞ
+- ✅ Suggest "close_short" CHỈ KHI: "🔴 SHORT Position:" có thông tin (Entry, Size...) - Position ĐANG MỞ
+- ❌ KHÔNG suggest "close_long" nếu "🟢 LONG Position: Không có" - Position CHƯA MỞ!
+- ❌ KHÔNG suggest "close_short" nếu "🔴 SHORT Position: Không có" - Position CHƯA MỞ!
+
+**BƯỚC 3: Nếu position ĐANG MỞ, check thêm điều kiện:**
+- Trong UNCLEAR mode: CHỈ suggest close khi ROI >= +5.0% (LÃI)
+- Trong TREND mode: Suggest close khi position ngược xu hướng (bất kể P/L)
 
 **Đóng lệnh:**
-- "close_long": Đóng toàn bộ LONG position (nếu rủi ro cao, xu hướng đảo chiều, hoặc loss quá lớn)
-- "close_short": Đóng toàn bộ SHORT position (nếu rủi ro cao, xu hướng đảo chiều, hoặc loss quá lớn)
+- "close_long": Đóng toàn bộ LONG position (CHỈ KHI có LONG position):
+  + Trong UNCLEAR mode: CHỈ khi LONG ROI >= +5.0% (LÃI), KHÔNG đóng khi < 5.0% hoặc LỖ!
+  + Trong TREND mode: Khi trend DOWNTREND (đóng lệnh ngược xu hướng, bất kể P/L)
+  + Hoặc khi rủi ro cao, loss quá lớn
+  + ❌ KHÔNG suggest nếu "LONG Position: Không có"!
+- "close_short": Đóng toàn bộ SHORT position (CHỈ KHI có SHORT position):
+  + Trong UNCLEAR mode: CHỈ khi SHORT ROI >= +5.0% (LÃI), KHÔNG đóng khi < 5.0% hoặc LỖ!
+  + Trong TREND mode: Khi trend UPTREND (đóng lệnh ngược xu hướng, bất kể P/L)
+  + Hoặc khi rủi ro cao, loss quá lớn
+  + ❌ KHÔNG suggest nếu "SHORT Position: Không có"!
 - "partial_close_long": Đóng một phần LONG:
   + Khi LONG đang LÃI và trend có dấu hiệu đảo → Lock profit (50-70%)
   + Khi LONG đang LÃI lớn (+15%+) và trend chậm lại → Take partial profit (30-50%)
@@ -1725,6 +1912,113 @@ Dựa trên thông tin tài khoản và positions, đánh giá:
     }
   ]
 }
+
+**⚠️ LƯU Ý CUỐI CÙNG TRƯỚC KHI SUGGEST:**
+
+**🔴 QUY TẮC VÀNG: CHỈ SUGGEST NHỮNG ACTION THỰC SỰ CẦN THIẾT!**
+
+1. **KHÔNG BAO GIỜ suggest action nếu lý do nói "không cần" hoặc "không có":**
+   - ❌ SAI: Suggest "close_long" với lý do "không có LONG position, nên không cần close_long"
+   - ❌ SAI: Suggest "close_short" với lý do "không có SHORT position, nên không cần close_short"
+   - ❌ SAI: Suggest "open_long" với lý do "đã có LONG position, không cần mở"
+   - ✅ ĐÚNG: Nếu không có LONG → KHÔNG suggest "close_long" (không suggest gì cả, hoặc chỉ suggest "hold")
+   - ✅ ĐÚNG: Nếu đã có LONG → KHÔNG suggest "open_long" (không suggest gì cả, hoặc chỉ suggest "hold")
+
+2. **CHECK POSITIONS TRƯỚC KHI SUGGEST "open_long" hoặc "open_short":**
+   - PHẢI đọc "VỊ THẾ ĐANG MỞ" trong data TRƯỚC KHI suggest
+   - ✅ Suggest "open_long" CHỈ KHI: "🟢 LONG Position: Không có"
+   - ✅ Suggest "open_short" CHỈ KHI: "🔴 SHORT Position: Không có"
+   - ❌ KHÔNG suggest "open_long" nếu đã có LONG (có Entry, Size...)
+   - ❌ KHÔNG suggest "open_short" nếu đã có SHORT (có Entry, Size...)
+   - Nếu đã có position → Suggest "hold" hoặc action khác, KHÔNG suggest "open"!
+
+3. **CHECK TREND VÀ POSITIONS TRƯỚC KHI SUGGEST TRONG TREND MODE:**
+   - **KHI TREND = DOWNTREND:**
+     + Nếu có SHORT (cùng chiều) → Suggest "hold" hoặc "add_to_short", KHÔNG suggest "close_short"!
+     + Nếu có LONG (ngược chiều) → Suggest "close_long" NGAY!
+     + Nếu chưa có SHORT → Suggest "open_short"
+     + ❌ KHÔNG suggest "open_long" (LONG ngược chiều với downtrend)!
+     + ❌ KHÔNG suggest "close_long" nếu không có LONG! (Không suggest gì cả, hoặc chỉ suggest "hold")
+   - **KHI TREND = UPTREND:**
+     + Nếu có LONG (cùng chiều) → Suggest "hold" hoặc "add_to_long", KHÔNG suggest "close_long"!
+     + Nếu có SHORT (ngược chiều) → Suggest "close_short" NGAY!
+     + Nếu chưa có LONG → Suggest "open_long"
+     + ❌ KHÔNG suggest "open_short" (SHORT ngược chiều với uptrend)!
+     + ❌ KHÔNG suggest "close_short" nếu không có SHORT! (Không suggest gì cả, hoặc chỉ suggest "hold")
+
+4. **Trong UNCLEAR mode - CHECK ROI TRƯỚC KHI SUGGEST "close":**
+   - PHẢI check ROI từ "VỊ THẾ ĐANG MỞ" trước khi suggest
+   - CHỈ suggest "close_long" hoặc "close_short" khi ROI >= +5.0% (ví dụ: 5.0%, 5.1%, 6.0%)
+   - Nếu ROI < 5.0% (ví dụ: 1.68%, 3.22%, 4.16%, 4.99%) → Suggest "hold", KHÔNG suggest "close"!
+   - Nếu ROI < 0% (LỖ) → Suggest "hold", KHÔNG suggest "close"!
+   - Action và lý do PHẢI khớp nhau (không mâu thuẫn!)
+
+5. **Validation checklist TRƯỚC KHI SUGGEST:**
+   
+   **A. Check positions:**
+   - ✅ Suggest "open_long"? → Check: "🟢 LONG Position: Không có"?
+   - ✅ Suggest "open_short"? → Check: "🔴 SHORT Position: Không có"?
+   
+   **B. Check trend và positions (TREND MODE):**
+   - ✅ Trend = DOWNTREND + có SHORT? → Suggest "hold" hoặc "add_to_short", KHÔNG suggest "close_short"!
+   - ✅ Trend = DOWNTREND + có LONG? → Suggest "close_long" NGAY! (CHỈ nếu có LONG position!)
+   - ✅ Trend = DOWNTREND + chưa có SHORT? → Suggest "open_short"
+   - ❌ Trend = DOWNTREND + không có LONG? → KHÔNG suggest "close_long"! (Không có position thì không đóng!)
+   - ❌ Trend = DOWNTREND? → KHÔNG suggest "open_long" (LONG ngược chiều)!
+   - ✅ Trend = UPTREND + có LONG? → Suggest "hold" hoặc "add_to_long", KHÔNG suggest "close_long"!
+   - ✅ Trend = UPTREND + có SHORT? → Suggest "close_short" NGAY! (CHỈ nếu có SHORT position!)
+   - ✅ Trend = UPTREND + chưa có LONG? → Suggest "open_long"
+   - ❌ Trend = UPTREND + không có SHORT? → KHÔNG suggest "close_short"! (Không có position thì không đóng!)
+   - ❌ Trend = UPTREND? → KHÔNG suggest "open_short" (SHORT ngược chiều)!
+   
+   **C. Check ROI (UNCLEAR MODE):**
+   - ✅ Suggest "close_long" trong unclear mode? → Check: LONG ROI >= 5.0%?
+   - ✅ Suggest "close_short" trong unclear mode? → Check: SHORT ROI >= 5.0%?
+   - Nếu không chắc chắn → Suggest "hold" thay vì action!
+
+6. **Ví dụ check cụ thể:**
+   
+   **Ví dụ 1 - DOWNTREND + có SHORT (CÙNG CHIỀU):**
+   - Data: "Trend: downtrend" + "🔴 SHORT Position: Entry=2.0189, Size=17..."
+   - Check: SHORT cùng chiều với downtrend
+   - ✅ Suggest: "hold" hoặc "add_to_short"
+   - ❌ KHÔNG suggest: "close_short" (SHORT đang cùng chiều!)
+   - ❌ KHÔNG suggest: "open_long" (LONG ngược chiều!)
+   
+   **Ví dụ 2 - DOWNTREND + có LONG (NGƯỢC CHIỀU):**
+   - Data: "Trend: downtrend" + "🟢 LONG Position: Entry=2.0155, Size=17..."
+   - Check: LONG ngược chiều với downtrend
+   - ✅ Suggest: "close_long" NGAY!
+   - ✅ Suggest: "open_short" (nếu chưa có SHORT)
+   
+   **Ví dụ 4 - DOWNTREND + KHÔNG có LONG:**
+   - Data: "Trend: downtrend" + "🟢 LONG Position: Không có"
+   - Check: Không có LONG position
+   - ✅ Suggest: "hold" hoặc "open_short" (nếu chưa có SHORT)
+   - ❌ KHÔNG suggest: "close_long" (Không có position thì không đóng!)
+   
+   **Ví dụ 3 - UNCLEAR + ROI < 5%:**
+   - Data: "Trend: unclear" + "ROI=+1.68%"
+   - Check: 1.68% < 5.0%
+   - ✅ Suggest: "hold"
+   - ❌ KHÔNG suggest: "close" (chưa đạt 5% ROI)
+
+7. **QUAN TRỌNG: Không được mâu thuẫn và không suggest vô nghĩa!**
+   - ❌ SAI: Suggest "close_long" với lý do "không có LONG position, nên không cần close_long" - Vô nghĩa! Không có thì đừng suggest!
+   - ❌ SAI: Suggest "close_short" với lý do "không có SHORT position, nên không cần close_short" - Vô nghĩa! Không có thì đừng suggest!
+   - ❌ SAI: Trend = DOWNTREND + có SHORT → Suggest "close_short" (SHORT cùng chiều, phải giữ!)
+   - ❌ SAI: Trend = DOWNTREND → Suggest "open_long" (LONG ngược chiều!)
+   - ❌ SAI: Suggest "open_short" nhưng data có "SHORT Position: Entry=2.0189..."
+   - ❌ SAI: Suggest "close_long" nhưng data có "🟢 LONG Position: Không có" - Không có position thì không suggest!
+   - ❌ SAI: Suggest "close_short" nhưng data có "🔴 SHORT Position: Không có" - Không có position thì không suggest!
+   - ❌ SAI: Suggest "close_short" trong unclear mode nhưng ROI < 5%
+   - ❌ SAI: Suggest "close_short" với lý do "ROI +2.18% < 5%, chưa đạt threshold" - Mâu thuẫn! Nếu chưa đạt thì không suggest close!
+   - ✅ ĐÚNG: Trend = DOWNTREND + có SHORT → Suggest "hold" với lý do "SHORT cùng chiều với downtrend"
+   - ✅ ĐÚNG: Trend = DOWNTREND + có LONG → Suggest "close_long" với lý do "LONG ngược chiều với downtrend"
+   - ✅ ĐÚNG: Trend = DOWNTREND + không có LONG → Suggest "hold" hoặc "open_short", KHÔNG suggest "close_long"!
+   - ✅ ĐÚNG: Không có LONG position → KHÔNG suggest "close_long" (chỉ suggest "hold" hoặc action khác cần thiết)
+   - ✅ ĐÚNG: ROI < 5% trong unclear mode → Suggest "hold" với lý do "SHORT ROI +2.18% < 5%, chưa đạt threshold, giữ nguyên"
+   - ✅ ĐÚNG: ROI >= 5% trong unclear mode → Suggest "close_short" với lý do "SHORT đạt +5.0% ROI, đóng để take profit"
 
 Chỉ trả về JSON, KHÔNG có text hay markdown khác!
 `;

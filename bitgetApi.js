@@ -488,24 +488,41 @@ class BitgetApi {
   }
 
   /**
-   * Lấy lịch sử lệnh (order history) cho symbol
+   * Lấy lịch sử lệnh (order history) cho symbol (Futures/Mix)
+   *
+   * Lưu ý:
+   * - Một số cụm Bitget đã bỏ /api/v2/mix/order/history (trả về 40404)
+   * - Để ổn định hơn, ưu tiên dùng unified endpoint /api/v3/trade/history-orders
+   *   với category=USDT-FUTURES/COIN-FUTURES/USDC-FUTURES.
    */
   async getOrderHistory(symbol, productType = 'umcbl', startTime = null, endTime = null, limit = 100) {
+    // Ưu tiên unified futures history: /api/v3/trade/history-orders
+    // Tham khảo: Bitget UTA Trade → Get Order History
+    const category = this.convertProductTypeToV2(productType); // USDT-FUTURES, COIN-FUTURES, ...
+
     const params = {
-      symbol,
-      productType: productType.toLowerCase(),
-      limit,
+      category,          // bắt buộc
+      limit: Math.min(limit || 100, 100),
     };
+
+    // unified endpoint không luôn yêu cầu symbol, nhưng nếu có thì truyền dạng không suffix
+    if (symbol) {
+      let cleanSymbol = symbol.replace(/_[A-Z]+$/, '');
+      params.symbol = cleanSymbol.toUpperCase();
+    }
+
     if (startTime) {
       params.startTime = startTime;
     }
     if (endTime) {
       params.endTime = endTime;
     }
-    return this.requestV2({
+
+    return this.request({
       method: 'GET',
-      path: '/api/mix/v1/order/history',
+      path: '/api/v3/trade/history-orders',
       params,
+      body: {},
     });
   }
 
