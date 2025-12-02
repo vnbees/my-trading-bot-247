@@ -656,24 +656,28 @@ LƯU Ý:
           case 'close_short':
             await this.closePosition('short');
             break;
-          case 'add_to_long':
-            if (capital && capital >= 1.0) {
-              await this.addToPosition('long', currentPrice, capital, accountStatus);
-            } else {
+          case 'add_to_long': {
+            let addCap = capital && capital > 0 ? capital : 0;
+            if (addCap < 1.0) {
               console.log(
-                `[GEMINI-AUTO] ⚠️ Bỏ qua add_to_long vì capital (${capital}) < 1 USDT`
+                `[GEMINI-AUTO] ℹ️ AI đề xuất add_to_long với capital=${addCap} < 1 USDT → tự động nâng lên 1 USDT`
               );
+              addCap = 1.0;
             }
+            await this.addToPosition('long', currentPrice, addCap, accountStatus);
             break;
-          case 'add_to_short':
-            if (capital && capital >= 1.0) {
-              await this.addToPosition('short', currentPrice, capital, accountStatus);
-            } else {
+          }
+          case 'add_to_short': {
+            let addCap = capital && capital > 0 ? capital : 0;
+            if (addCap < 1.0) {
               console.log(
-                `[GEMINI-AUTO] ⚠️ Bỏ qua add_to_short vì capital (${capital}) < 1 USDT`
+                `[GEMINI-AUTO] ℹ️ AI đề xuất add_to_short với capital=${addCap} < 1 USDT → tự động nâng lên 1 USDT`
               );
+              addCap = 1.0;
             }
+            await this.addToPosition('short', currentPrice, addCap, accountStatus);
             break;
+          }
           case 'partial_close_long':
             if (percentage && percentage > 0 && percentage < 100) {
               await this.partialClose('long', percentage);
@@ -692,34 +696,28 @@ LƯU Ý:
               );
             }
             break;
-          case 'rebalance_long':
-            if (target_size && target_size >= 1.0) {
-              await this.rebalancePosition(
-                'long',
-                target_size,
-                currentPrice,
-                accountStatus
-              );
-            } else {
+          case 'rebalance_long': {
+            let tgt = target_size && target_size > 0 ? target_size : 0;
+            if (tgt < 1.0) {
               console.log(
-                `[GEMINI-AUTO] ⚠️ target_size không hợp lệ cho rebalance_long: ${target_size}`
+                `[GEMINI-AUTO] ℹ️ AI đề xuất rebalance_long với target_size=${tgt} < 1 USDT → tự động nâng lên 1 USDT`
               );
+              tgt = 1.0;
             }
+            await this.rebalancePosition('long', tgt, currentPrice, accountStatus);
             break;
-          case 'rebalance_short':
-            if (target_size && target_size >= 1.0) {
-              await this.rebalancePosition(
-                'short',
-                target_size,
-                currentPrice,
-                accountStatus
-              );
-            } else {
+          }
+          case 'rebalance_short': {
+            let tgt = target_size && target_size > 0 ? target_size : 0;
+            if (tgt < 1.0) {
               console.log(
-                `[GEMINI-AUTO] ⚠️ target_size không hợp lệ cho rebalance_short: ${target_size}`
+                `[GEMINI-AUTO] ℹ️ AI đề xuất rebalance_short với target_size=${tgt} < 1 USDT → tự động nâng lên 1 USDT`
               );
+              tgt = 1.0;
             }
+            await this.rebalancePosition('short', tgt, currentPrice, accountStatus);
             break;
+          }
           case 'hold':
           default:
             console.log('[GEMINI-AUTO] ℹ️ Action hold/unknown → không làm gì.');
