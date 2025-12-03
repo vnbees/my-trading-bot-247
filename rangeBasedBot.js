@@ -331,14 +331,14 @@ class RangeBasedBot {
       `[RANGE-BOT] 💡 Tín hiệu: Nến ${analysis.isGreen ? 'XANH' : 'ĐỎ'} → Vào lệnh ${analysis.direction.toUpperCase()}`
     );
 
-    // Kiểm tra position hiện tại
+    // Kiểm tra position hiện tại (chỉ để log, không đóng)
     const currentPosition = await this.getCurrentPosition();
     if (currentPosition) {
       console.log(
-        `[RANGE-BOT] ⚠️ Đang có position ${currentPosition.direction.toUpperCase()}, đóng trước khi vào lệnh mới.`
+        `[RANGE-BOT] ℹ️ Đang có position ${currentPosition.direction.toUpperCase()} (size=${formatNumber(currentPosition.size)}), sẽ giữ nguyên và mở lệnh mới.`
       );
-      await this.closePosition(currentPosition.direction);
-      await sleep(2000);
+    } else {
+      console.log(`[RANGE-BOT] ℹ️ Hiện không có position đang mở.`);
     }
 
     // Lấy giá hiện tại
