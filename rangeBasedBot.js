@@ -10,6 +10,7 @@
 
 require('dotenv').config();
 const axios = require('axios');
+const { BollingerBands } = require('technicalindicators');
 const {
   sleep,
   formatNumber,
@@ -53,6 +54,9 @@ class RangeBasedBot {
 
     await this.prepareMarketMeta();
     await this.configureLeverage();
+
+    // Log thông tin thị trường ngay, không cần đợi đến đầu giờ
+    await this.logMarketInfo();
 
     // Chờ đến đầu giờ tiếp theo
     await this.waitForNextHour();
@@ -123,6 +127,100 @@ class RangeBasedBot {
   }
 
   /**
+   * Tính Bollinger Bands cho các nến
+   * Sử dụng thư viện technicalindicators để đảm bảo đồng nhất với TradingView
+   * Cấu hình đồng nhất với TradingView:
+   * - Length: 20
+   * - Basis MA Type: SMA (Simple Moving Average)
+   * - Source: Close
+   * - StdDev: 2
+   * - Offset: 0
+   * - Wait for timeframe closes: true (chỉ tính khi nến đã đóng cửa)
+   * 
+   * @param {Array} klines - Mảng các nến (chỉ tính cho nến đã đóng cửa)
+   * @param {number} period - Chu kỳ (mặc định 20)
+   * @param {number} stdDev - Độ lệch chuẩn (mặc định 2)
+   * @returns {Array} Mảng các object chứa upperBand, middleBand, lowerBand cho mỗi nến
+   */
+  calculateBollingerBands(klines, period = 20, stdDev = 2) {
+    if (!klines || klines.length < period) {
+      return [];
+    }
+
+    // Lấy giá đóng cửa (Source: Close)
+    const closes = klines.map(k => k.close);
+    
+    // Sử dụng thư viện technicalindicators để tính Bollinger Bands
+    // Đảm bảo đồng nhất với TradingView và các bot khác
+    const bbResults = BollingerBands.calculate({
+      values: closes,
+      period: period,
+      stdDev: stdDev,
+    });
+
+    // Map kết quả về format của bot
+    const bands = [];
+    for (let i = 0; i < bbResults.length; i++) {
+      // Index trong klines = i + period - 1 (vì BB bắt đầu từ nến thứ period-1)
+      const klineIndex = i + period - 1;
+      if (klineIndex < klines.length) {
+        bands.push({
+          index: klineIndex,
+          upperBand: bbResults[i].upper,
+          middleBand: bbResults[i].middle,
+          lowerBand: bbResults[i].lower,
+          candle: klines[klineIndex],
+        });
+      }
+    }
+    
+    return bands;
+  }
+
+  /**
+   * Xác định trend dựa trên hướng của band trên và band dưới
+   * 
+   * Quy tắc:
+   * - UPTREND: Chỉ khi upper và lower cùng TĂNG (cả 2 đều tăng)
+   * - DOWNTREND: Chỉ khi upper và lower cùng GIẢM (cả 2 đều giảm)
+   * - SIDEWAY: Tất cả các trường hợp còn lại:
+   *   + Một tăng, một giảm
+   *   + Một tăng, một flat (không đổi)
+   *   + Một giảm, một flat
+   *   + Cả 2 đều flat
+   * 
+   * @param {Object} currentBands - Bands của nến hiện tại
+   * @param {Object} previousBands - Bands của nến trước đó
+   * @returns {string} 'uptrend', 'downtrend', hoặc 'sideway'
+   */
+  determineTrend(currentBands, previousBands) {
+    if (!currentBands || !previousBands) {
+      return 'unknown';
+    }
+
+    // Xác định hướng của upper band: tăng, giảm, hoặc không đổi
+    const upperBandDirection = currentBands.upperBand > previousBands.upperBand ? 'up' : 
+                               currentBands.upperBand < previousBands.upperBand ? 'down' : 'flat';
+    // Xác định hướng của lower band: tăng, giảm, hoặc không đổi
+    const lowerBandDirection = currentBands.lowerBand > previousBands.lowerBand ? 'up' : 
+                               currentBands.lowerBand < previousBands.lowerBand ? 'down' : 'flat';
+
+    // Chỉ khi cả 2 band cùng TĂNG → UPTREND
+    if (upperBandDirection === 'up' && lowerBandDirection === 'up') {
+      return 'uptrend';
+    }
+    
+    // Chỉ khi cả 2 band cùng GIẢM → DOWNTREND
+    if (upperBandDirection === 'down' && lowerBandDirection === 'down') {
+      return 'downtrend';
+    }
+    
+    // Tất cả các trường hợp còn lại → SIDEWAY
+    // (một tăng một giảm, một tăng một flat, một giảm một flat, cả 2 flat)
+    return 'sideway';
+  }
+
+  /**
    * Tính trung bình biên độ của các nến (dưới dạng phần trăm)
    * Sử dụng dữ liệu 1 tháng (720 nến 1h) để tính toán
    */
@@ -187,6 +285,28 @@ class RangeBasedBot {
     };
   }
 
+  /**
+   * Chỉ log thông tin cơ bản khi khởi động bot
+   * Không log chi tiết BB, sẽ log khi đến giờ chạy
+   */
+  async logMarketInfo() {
+    try {
+      const now = new Date();
+      console.log('\n' + '='.repeat(70));
+      console.log(
+        `[RANGE-BOT] 📊 Bot đã khởi động - ${now.toLocaleString('vi-VN')}`
+      );
+      console.log('='.repeat(70));
+      console.log('[RANGE-BOT] ℹ️ Thông tin chi tiết BB và trend sẽ được log khi đến giờ chạy');
+      console.log('='.repeat(70) + '\n');
+    } catch (err) {
+      console.error(`[RANGE-BOT] ❌ Lỗi khi log thông tin: ${err.message}`);
+      if (err.stack) {
+        console.error(err.stack);
+      }
+    }
+  }
+
   async executeCycle() {
     const now = new Date();
     const currentHour = now.getHours();
@@ -221,6 +341,57 @@ class RangeBasedBot {
         throw new Error(`Không đủ dữ liệu nến (cần ít nhất 24 nến, nhận được ${klines?.length || 0})`);
       }
     }
+
+    // Tính Bollinger Bands cho tất cả nến
+    // Đảm bảo có đủ nến để tính (cần ít nhất 20 nến)
+    if (klines.length < 20) {
+      console.warn(`[RANGE-BOT] ⚠️ Không đủ nến để tính Bollinger Bands (cần ít nhất 20, có ${klines.length})`);
+      return;
+    }
+    
+    const bands = this.calculateBollingerBands(klines, 20, 2);
+    console.log(`[RANGE-BOT] ✅ Đã tính Bollinger Bands cho ${bands.length} nến (từ ${klines.length} nến input)`);
+    
+    // Log trend cho từng nến (chỉ log 3 nến gần nhất)
+    const logCount = Math.min(3, bands.length); // Log 3 nến gần nhất
+    const bandsToLog = bands.slice(-logCount);
+    
+    console.log('\n' + '─'.repeat(70));
+    console.log(`[RANGE-BOT] 📊 PHÂN TÍCH TREND CHO ${bandsToLog.length} NẾN GẦN NHẤT:`);
+    console.log('─'.repeat(70));
+    
+    for (let i = 0; i < bandsToLog.length; i++) {
+      const currentBands = bandsToLog[i];
+      const candle = currentBands.candle;
+      const candleTime = new Date(candle.time);
+      
+      let trend = 'unknown';
+      let trendEmoji = '❓';
+      
+      if (i > 0) {
+        const previousBands = bandsToLog[i - 1];
+        trend = this.determineTrend(currentBands, previousBands);
+        
+        if (trend === 'uptrend') {
+          trendEmoji = '📈';
+        } else if (trend === 'downtrend') {
+          trendEmoji = '📉';
+        } else if (trend === 'sideway') {
+          trendEmoji = '➡️';
+        }
+      }
+      
+      const candleColor = candle.close > candle.open ? '🟢 XANH' : candle.close < candle.open ? '🔴 ĐỎ' : '⚪ DOJI';
+      
+      console.log(
+        `[${i + 1}] ${candleTime.toLocaleString('vi-VN')} | ${candleColor} | ` +
+        `Trend: ${trendEmoji} ${trend.toUpperCase()} | ` +
+        `Upper: ${formatNumber(currentBands.upperBand)}, Lower: ${formatNumber(currentBands.lowerBand)} | ` +
+        `O: ${formatNumber(candle.open)}, H: ${formatNumber(candle.high)}, L: ${formatNumber(candle.low)}, C: ${formatNumber(candle.close)}`
+      );
+    }
+    
+    console.log('─'.repeat(70) + '\n');
 
     // Tính trung bình biên độ (từ 1 tháng dữ liệu)
     const rangeData = this.calculateAverageRange(klines);
@@ -307,6 +478,93 @@ class RangeBasedBot {
     console.log(
       `  O: ${previousCandle.open.toFixed(this.priceDecimals)}, H: ${previousCandle.high.toFixed(this.priceDecimals)}, L: ${previousCandle.low.toFixed(this.priceDecimals)}, C: ${previousCandle.close.toFixed(this.priceDecimals)}`
     );
+    
+    // Xác định trend của nến đang được phân tích
+    let currentTrend = 'unknown';
+    let currentTrendEmoji = '❓';
+    let currentTrendLabel = 'UNKNOWN';
+    let candleBands = null;
+    
+    if (bands.length > 0 && previousCandleIndex >= 19) {
+      // Bands chỉ có từ index 19 trở đi (vì period = 20)
+      // previousCandleIndex trong klines tương ứng với (previousCandleIndex - 19) trong bands
+      const bandsIndex = previousCandleIndex - 19;
+      
+      if (bandsIndex >= 0 && bandsIndex < bands.length) {
+        candleBands = bands[bandsIndex];
+        
+        // Kiểm tra xem có phải cùng nến không (để chắc chắn)
+        const bandCandleTime = new Date(candleBands.candle.time).getTime();
+        const prevCandleTime = previousCandleTime.getTime();
+        
+        if (Math.abs(bandCandleTime - prevCandleTime) < 3600000) { // Cùng nến (sai số < 1 giờ)
+          // Tìm bands của nến trước đó để so sánh
+          if (bandsIndex > 0) {
+            const previousBands = bands[bandsIndex - 1];
+            currentTrend = this.determineTrend(candleBands, previousBands);
+            
+            if (currentTrend === 'uptrend') {
+              currentTrendEmoji = '📈';
+              currentTrendLabel = 'UPTREND';
+            } else if (currentTrend === 'downtrend') {
+              currentTrendEmoji = '📉';
+              currentTrendLabel = 'DOWNTREND';
+            } else if (currentTrend === 'sideway') {
+              currentTrendEmoji = '➡️';
+              currentTrendLabel = 'SIDEWAY';
+            }
+            
+            const upperDirection = candleBands.upperBand > previousBands.upperBand ? '↑' : 
+                                   candleBands.upperBand < previousBands.upperBand ? '↓' : '→';
+            const lowerDirection = candleBands.lowerBand > previousBands.lowerBand ? '↑' : 
+                                   candleBands.lowerBand < previousBands.lowerBand ? '↓' : '→';
+            
+            console.log('\n' + '═'.repeat(70));
+            console.log(`[RANGE-BOT] 🎯 TRẠNG THÁI THỊ TRƯỜNG TẠI THỜI ĐIỂM CHẠY:`);
+            console.log(`  ${currentTrendEmoji} ${currentTrendLabel}`);
+            console.log(`  - Upper Band: ${formatNumber(candleBands.upperBand)} ${upperDirection} (trước: ${formatNumber(previousBands.upperBand)})`);
+            console.log(`  - Lower Band: ${formatNumber(candleBands.lowerBand)} ${lowerDirection} (trước: ${formatNumber(previousBands.lowerBand)})`);
+            console.log(`  - Middle Band (SMA): ${formatNumber(candleBands.middleBand)}`);
+            console.log('═'.repeat(70) + '\n');
+          }
+        }
+      }
+    }
+    
+    // Nếu không xác định được trend, log cảnh báo
+    if (currentTrend === 'unknown') {
+      console.warn('[RANGE-BOT] ⚠️ Không thể xác định trend của nến đang phân tích');
+    }
+
+    // Kiểm tra điều kiện vào lệnh: CHỈ vào lệnh khi thị trường đang SIDEWAY
+    if (currentTrend !== 'sideway') {
+      if (currentTrend === 'uptrend') {
+        console.log('\n' + '─'.repeat(70));
+        console.log(`[RANGE-BOT] ⏸️  BỎ QUA GIAO DỊCH - Thị trường đang UPTREND`);
+        console.log(`  📈 Upper và Lower Band đang cùng tăng → Không vào lệnh`);
+        console.log(`  💡 Chỉ vào lệnh khi thị trường đang SIDEWAY`);
+        console.log('─'.repeat(70) + '\n');
+      } else if (currentTrend === 'downtrend') {
+        console.log('\n' + '─'.repeat(70));
+        console.log(`[RANGE-BOT] ⏸️  BỎ QUA GIAO DỊCH - Thị trường đang DOWNTREND`);
+        console.log(`  📉 Upper và Lower Band đang cùng giảm → Không vào lệnh`);
+        console.log(`  💡 Chỉ vào lệnh khi thị trường đang SIDEWAY`);
+        console.log('─'.repeat(70) + '\n');
+      } else {
+        console.log('\n' + '─'.repeat(70));
+        console.log(`[RANGE-BOT] ⏸️  BỎ QUA GIAO DỊCH - Không xác định được trend`);
+        console.log(`  ❓ Không thể xác định trạng thái thị trường → Không vào lệnh`);
+        console.log(`  💡 Chỉ vào lệnh khi thị trường đang SIDEWAY`);
+        console.log('─'.repeat(70) + '\n');
+      }
+      this.lastProcessedHour = currentHour;
+      return;
+    }
+
+    // Thị trường đang SIDEWAY → Tiếp tục phân tích nến để vào lệnh
+    console.log('\n' + '─'.repeat(70));
+    console.log(`[RANGE-BOT] ✅ THỊ TRƯỜNG ĐANG SIDEWAY - Tiếp tục phân tích để vào lệnh`);
+    console.log('─'.repeat(70) + '\n');
 
     // Phân tích nến
     const analysis = this.analyzeCandle(previousCandle);
@@ -343,6 +601,21 @@ class RangeBasedBot {
 
     // Lấy giá hiện tại
     const currentPrice = await this.getCurrentPrice();
+
+    // Log thông tin trend và BB trước khi vào lệnh
+    console.log('\n' + '═'.repeat(70));
+    console.log(`[RANGE-BOT] 📊 THÔNG TIN THỊ TRƯỜNG KHI VÀO LỆNH:`);
+    console.log(`  ${currentTrendEmoji} ${currentTrendLabel}`);
+    if (candleBands) {
+      console.log(`  - Upper Band: ${formatNumber(candleBands.upperBand)}`);
+      console.log(`  - Lower Band: ${formatNumber(candleBands.lowerBand)}`);
+      console.log(`  - Middle Band (SMA): ${formatNumber(candleBands.middleBand)}`);
+    } else {
+      console.log(`  - ⚠️ Không có thông tin Bollinger Bands`);
+    }
+    console.log(`  - Giá hiện tại: ${formatNumber(currentPrice)}`);
+    console.log(`  - Hướng lệnh: ${analysis.direction.toUpperCase()}`);
+    console.log('═'.repeat(70) + '\n');
 
     // Vào lệnh (truyền biên độ trung bình để tính TP, không phải ROI target)
     await this.openPosition(
