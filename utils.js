@@ -25,12 +25,18 @@ const percentFormat = (value) => `${(value * 100).toFixed(2)}%`;
 
 const roundToTick = (value, tickSize = 0.1) => {
   if (!tickSize) return value;
-  return Math.round(value / tickSize) * tickSize;
+  const rounded = Math.round(value / tickSize) * tickSize;
+  // Fix floating-point precision errors by converting to fixed decimal and back
+  const decimals = getDecimalsFromStep(tickSize);
+  return Number(rounded.toFixed(decimals));
 };
 
 const roundToStep = (value, step = 0.0001) => {
   if (!step) return value;
-  return Math.floor(value / step) * step;
+  const rounded = Math.floor(value / step) * step;
+  // Fix floating-point precision errors by converting to fixed decimal and back
+  const decimals = getDecimalsFromStep(step);
+  return Number(rounded.toFixed(decimals));
 };
 
 const getDecimalsFromStep = (step) => {

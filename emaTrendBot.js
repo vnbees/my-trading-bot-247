@@ -24,7 +24,7 @@ class EmaTrendBot {
       marginCoin: 'USDT',
       capital: null, // Số tiền muốn vào lệnh (USDT), null = dùng toàn bộ equity
       leverage: 10, // Leverage mặc định
-      
+
       // Indicator Parameters
       timeFrame: '5m',
       ema25: 25,
@@ -33,12 +33,12 @@ class EmaTrendBot {
       ema200: 200,
       atrPeriod: 14, // Period cho ATR
       atrMultiplier: 2, // Multiplier cho TP (TP = entryPrice ± ATR * multiplier)
-      
+
       // Technical
       priceTickSize: 0,
       sizeStep: 0,
       pollIntervalMs: 5 * 60 * 1000, // Check mỗi 5 phút (5m)
-      
+
       ...config,
     };
     this.isRunning = false;
@@ -53,8 +53,8 @@ class EmaTrendBot {
   async run() {
     this.isRunning = true;
     console.log('[EMA-TREND] 🚀 Khởi động EMA Trend Bot với 4 đường EMA (25, 50, 100, 200)');
-    const capitalStr = this.config.capital && this.config.capital > 0 
-      ? `${this.config.capital} ${this.config.marginCoin}` 
+    const capitalStr = this.config.capital && this.config.capital > 0
+      ? `${this.config.capital} ${this.config.marginCoin}`
       : 'Auto (toàn bộ equity)';
     console.table({
       'Cặp giao dịch': this.config.symbol,
@@ -71,7 +71,7 @@ class EmaTrendBot {
     // Kiểm tra positions hiện tại
     console.log('[EMA-TREND] 🔍 Kiểm tra positions hiện tại...');
     const existingPosition = await this.getCurrentPosition();
-    
+
     if (existingPosition) {
       console.log(`[EMA-TREND] ✅ Phát hiện position đang mở: ${existingPosition.direction.toUpperCase()}`);
       console.log(`  - Entry: ${formatNumber(existingPosition.entryPrice)}`);
@@ -135,7 +135,7 @@ class EmaTrendBot {
       };
 
       const response = await axios.get(url, { params });
-      
+
       if (!Array.isArray(response.data)) {
         throw new Error('Binance API trả về dữ liệu không hợp lệ');
       }
@@ -168,8 +168,8 @@ class EmaTrendBot {
         const low = parseFloat(candle[3]);
         const close = parseFloat(candle[4]);
 
-        if (!isNaN(high) && !isNaN(low) && !isNaN(close) && !isNaN(open) && 
-            high > 0 && low > 0 && close > 0 && open > 0) {
+        if (!isNaN(high) && !isNaN(low) && !isNaN(close) && !isNaN(open) &&
+          high > 0 && low > 0 && close > 0 && open > 0) {
           highs.push(high);
           lows.push(low);
           closes.push(close);
@@ -264,9 +264,9 @@ class EmaTrendBot {
     if (!indicators || !indicators.ema25 || !indicators.ema50 || !indicators.ema100 || !indicators.ema200) {
       return false;
     }
-    return indicators.ema25 > indicators.ema50 && 
-           indicators.ema50 > indicators.ema100 && 
-           indicators.ema100 > indicators.ema200;
+    return indicators.ema25 > indicators.ema50 &&
+      indicators.ema50 > indicators.ema100 &&
+      indicators.ema100 > indicators.ema200;
   }
 
   /**
@@ -277,9 +277,9 @@ class EmaTrendBot {
     if (!indicators || !indicators.ema25 || !indicators.ema50 || !indicators.ema100 || !indicators.ema200) {
       return false;
     }
-    return indicators.ema25 < indicators.ema50 && 
-           indicators.ema50 < indicators.ema100 && 
-           indicators.ema100 < indicators.ema200;
+    return indicators.ema25 < indicators.ema50 &&
+      indicators.ema50 < indicators.ema100 &&
+      indicators.ema100 < indicators.ema200;
   }
 
   /**
@@ -327,8 +327,8 @@ class EmaTrendBot {
     }
 
     // Sử dụng capital nếu được chỉ định, nếu không dùng equity
-    const capital = this.config.capital && this.config.capital > 0 
-      ? Math.min(this.config.capital, equity) 
+    const capital = this.config.capital && this.config.capital > 0
+      ? Math.min(this.config.capital, equity)
       : equity;
 
     // Tính notional value (giá trị hợp đồng)
@@ -349,7 +349,7 @@ class EmaTrendBot {
     if (size < minLotSize) {
       const minNotional = minLotSize * entryPrice;
       const minCapitalRequired = minNotional / this.config.leverage;
-      
+
       return {
         size: Number(minLotSize.toFixed(8)),
         capital: capital,
@@ -427,13 +427,13 @@ class EmaTrendBot {
     // Kiểm tra LONG entry
     if (this.checkLongEntry(indicators)) {
       console.log('[EMA-TREND] ✅ Tín hiệu LONG: Uptrend + nến đỏ');
-      
+
       // Đóng short nếu có
       if (this.currentPosition && this.currentPosition.direction === 'short' && this.currentPosition.isActive) {
         console.log('[EMA-TREND] 🔄 Đóng lệnh SHORT trước khi vào LONG');
         await this.closePosition();
       }
-      
+
       await this.enterPosition('long', indicators);
       return;
     }
@@ -441,13 +441,13 @@ class EmaTrendBot {
     // Kiểm tra SHORT entry
     if (this.checkShortEntry(indicators)) {
       console.log('[EMA-TREND] ✅ Tín hiệu SHORT: Downtrend + nến xanh');
-      
+
       // Đóng long nếu có
       if (this.currentPosition && this.currentPosition.direction === 'long' && this.currentPosition.isActive) {
         console.log('[EMA-TREND] 🔄 Đóng lệnh LONG trước khi vào SHORT');
         await this.closePosition();
       }
-      
+
       await this.enterPosition('short', indicators);
       return;
     }
@@ -550,7 +550,7 @@ class EmaTrendBot {
     const now = new Date();
     const currentSeconds = now.getSeconds();
     const currentMilliseconds = now.getMilliseconds();
-    
+
     // Parse timeframe (1m, 5m, 15m, etc.)
     const timeframeMatch = this.config.timeFrame.match(/^(\d+)([mhd])$/i);
     if (!timeframeMatch) {
@@ -561,12 +561,12 @@ class EmaTrendBot {
       const secondsUntilNext = (minutesUntilNext * 60) - currentSeconds;
       return Math.max((secondsUntilNext * 1000) - currentMilliseconds, 100);
     }
-    
+
     const interval = parseInt(timeframeMatch[1]);
     const unit = timeframeMatch[2].toLowerCase();
-    
+
     let secondsUntilNext = 0;
-    
+
     if (unit === 'm') {
       // Minutes
       const currentMinutes = now.getMinutes();
@@ -586,9 +586,9 @@ class EmaTrendBot {
       const intervalSeconds = interval * 86400;
       secondsUntilNext = intervalSeconds - (currentSecondsInDay % intervalSeconds);
     }
-    
+
     const millisecondsUntilNext = (secondsUntilNext * 1000) - currentMilliseconds;
-    
+
     // Đảm bảo ít nhất đợi 100ms để tránh chạy quá sớm
     return Math.max(millisecondsUntilNext, 100);
   }
@@ -630,7 +630,7 @@ class EmaTrendBot {
   async closePosition() {
     // Lấy position từ API để đảm bảo có dữ liệu mới nhất
     const apiPosition = await this.getCurrentPosition();
-    
+
     if (!apiPosition || !apiPosition.isActive) {
       // Nếu không có position từ API, clear local state
       if (this.currentPosition) {
@@ -685,7 +685,7 @@ class EmaTrendBot {
   async getCurrentPosition() {
     try {
       const positionData = await this.api.getPosition(this.config.symbol, this.config.marginCoin);
-      
+
       // Xử lý nếu API trả về array
       let position = positionData;
       if (Array.isArray(positionData)) {
@@ -701,7 +701,7 @@ class EmaTrendBot {
           return null;
         }
       }
-      
+
       if (!position) {
         return null;
       }
@@ -738,11 +738,11 @@ class EmaTrendBot {
     try {
       const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : 'umcbl';
       const account = await this.api.getAccount(productType, this.config.marginCoin);
-      
+
       const equity = Number(
-        account?.equity || 
-        account?.availableEquity || 
-        account?.availableBalance || 
+        account?.equity ||
+        account?.availableEquity ||
+        account?.availableBalance ||
         account?.available ||
         0
       );
@@ -791,26 +791,26 @@ class EmaTrendBot {
    */
   async prepareMarketMeta() {
     if (this.marketInfoLoaded) return;
-    
+
     try {
       const productType = this.config.symbol.includes('_UMCBL') ? 'umcbl' : undefined;
       const contract = await this.api.getContract(this.config.symbol, productType);
-      
+
       if (!contract) {
         throw new Error(`Không tìm thấy contract "${this.config.symbol}"`);
       }
 
       const derivedPriceTick = Number(
-        contract.priceTick || 
-        contract.priceStep || 
-        contract.minPriceChange || 
+        contract.priceTick ||
+        contract.priceStep ||
+        contract.minPriceChange ||
         0
       );
-      
+
       const derivedSizeStep = Number(
-        contract.quantityTick || 
-        contract.sizeTick || 
-        contract.minTradeNum || 
+        contract.quantityTick ||
+        contract.sizeTick ||
+        contract.minTradeNum ||
         0
       );
 
