@@ -186,7 +186,9 @@ class EmaTrendBot {
    */
   async calculateIndicators() {
     try {
-      const candles = await this.fetchCandles(this.config.symbol, this.config.timeFrame, 200);
+      // Lấy ít nhất 300 nến để đảm bảo có đủ 200 nến đã đóng sau khi loại bỏ nến cuối
+      // EMA200 cần ít nhất 200 nến đã đóng
+      const candles = await this.fetchCandles(this.config.symbol, this.config.timeFrame, 300);
       const { highs, lows, closes, opens } = this.parseCandles(candles);
 
       // Loại bỏ nến cuối cùng (nến đang chạy, chưa đóng) để chỉ dùng nến đã đóng
