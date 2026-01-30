@@ -151,9 +151,11 @@ async function getSpotAccountInfo(api) {
 /**
  * Tính tổng tài sản và lấy giá cho các coin
  * Giữ nguyên giá trị gốc từ API, không làm tròn
+ * Chỉ tính tổng từ USDT + BTC + PAXG + BGB
  */
 async function calculateTotalAssets(api, assets) {
   const holdings = [];
+  const importantCoins = ['USDT', 'BTC', 'PAXG', 'BGB']; // Chỉ tính tổng từ các coin này
   let totalUSDT = 0;
   
   // Lọc các coin có số dư > 0 - giữ nguyên giá trị gốc
@@ -184,7 +186,11 @@ async function calculateTotalAssets(api, assets) {
       valueUSDT = valueNum.toString(); // Convert sang string để giữ precision
     }
     
-    totalUSDT += parseFloat(valueUSDT);
+    // Chỉ tính vào tổng nếu là coin quan trọng
+    const isImportantCoin = importantCoins.includes(coin);
+    if (isImportantCoin) {
+      totalUSDT += parseFloat(valueUSDT);
+    }
     
     holdings.push({
       coin,
@@ -193,29 +199,37 @@ async function calculateTotalAssets(api, assets) {
       frozen, // Giữ nguyên string từ API
       price: price.toString(), // Convert sang string
       valueUSDT, // String để giữ precision
+      isImportantCoin, // Đánh dấu coin quan trọng
       raw: asset, // Lưu toàn bộ object gốc
     });
   }
   
-  // Sắp xếp theo giá trị USDT giảm dần
-  holdings.sort((a, b) => parseFloat(b.valueUSDT) - parseFloat(a.valueUSDT));
+  // Sắp xếp: coin quan trọng trước, sau đó theo giá trị USDT giảm dần
+  holdings.sort((a, b) => {
+    if (a.isImportantCoin && !b.isImportantCoin) return -1;
+    if (!a.isImportantCoin && b.isImportantCoin) return 1;
+    return parseFloat(b.valueUSDT) - parseFloat(a.valueUSDT);
+  });
   
   return {
     holdings,
     totalUSDT: totalUSDT.toString(), // Convert sang string để giữ precision
+    importantCoins, // Trả về danh sách coin quan trọng
   };
 }
 
 /**
  * Hiển thị thông tin tài khoản spot
  * Hiển thị giá trị gốc từ API, không làm tròn
+ * Hiển thị phần trăm cho các coin quan trọng (USDT, BTC, PAXG, BGB)
  */
 function displaySpotAccountInfo(accountInfo) {
   console.log(`\n${'='.repeat(50)}`);
   console.log(`💼 Tài Khoản Spot`);
   console.log(`${'='.repeat(50)}`);
-  // Hiển thị tổng tài sản với giá trị gốc (có thể có nhiều chữ số thập phân)
-  console.log(`💰 Tổng tài sản: ${displayRawNumber(accountInfo.totalUSDT)} USDT\n`);
+  // Hiển thị tổng tài sản (chỉ tính từ USDT + BTC + PAXG + BGB)
+  const totalUSDTNum = parseFloat(accountInfo.totalUSDT || '0');
+  console.log(`💰 Tổng tài sản (USDT + BTC + PAXG + BGB): ${displayRawNumber(accountInfo.totalUSDT)} USDT\n`);
   
   if (accountInfo.holdings.length === 0) {
     console.log('   Không có coin nào trong tài khoản.\n');
@@ -223,20 +237,52 @@ function displaySpotAccountInfo(accountInfo) {
     return;
   }
   
-  console.log('📊 Danh mục coin:\n');
+  // Phân loại coin quan trọng và coin khác
+  const importantHoldings = accountInfo.holdings.filter(h => h.isImportantCoin);
+  const otherHoldings = accountInfo.holdings.filter(h => !h.isImportantCoin);
   
-  for (const holding of accountInfo.holdings) {
-    const coinDisplay = holding.coin.padEnd(8);
-    // Hiển thị giá trị gốc, không làm tròn
-    const amountStr = displayRawNumber(holding.total);
-    const valueStr = displayRawNumber(holding.valueUSDT);
+  // Hiển thị coin quan trọng với phần trăm
+  if (importantHoldings.length > 0) {
+    console.log('📊 Danh mục coin (tính vào tổng tài sản):\n');
     
-    if (holding.coin === 'USDT') {
-      console.log(`   ${coinDisplay}: ${amountStr} USDT`);
-    } else {
-      const priceStr = displayRawNumber(holding.price);
-      const frozenStr = holding.frozen > 0 ? ` (đóng băng: ${displayRawNumber(holding.frozen)})` : '';
-      console.log(`   ${coinDisplay}: ${amountStr} ${holding.coin} = ${valueStr} USDT (giá: ${priceStr} USDT)${frozenStr}`);
+    for (const holding of importantHoldings) {
+      const coinDisplay = holding.coin.padEnd(8);
+      // Hiển thị giá trị gốc, không làm tròn
+      const amountStr = displayRawNumber(holding.total);
+      const valueStr = displayRawNumber(holding.valueUSDT);
+      
+      // Tính phần trăm
+      const valueNum = parseFloat(holding.valueUSDT || '0');
+      const percentage = totalUSDTNum > 0 ? (valueNum / totalUSDTNum * 100) : 0;
+      const percentageStr = percentage.toFixed(2);
+      
+      if (holding.coin === 'USDT') {
+        console.log(`   ${coinDisplay}: ${amountStr} USDT = ${valueStr} USDT (${percentageStr}%)`);
+      } else {
+        const priceStr = displayRawNumber(holding.price);
+        const frozenStr = parseFloat(holding.frozen || '0') > 0 ? ` (đóng băng: ${displayRawNumber(holding.frozen)})` : '';
+        console.log(`   ${coinDisplay}: ${amountStr} ${holding.coin} = ${valueStr} USDT (${percentageStr}%) | giá: ${priceStr} USDT${frozenStr}`);
+      }
+    }
+  }
+  
+  // Hiển thị coin khác (không tính vào tổng)
+  if (otherHoldings.length > 0) {
+    console.log(`\n📋 Các coin khác (không tính vào tổng tài sản):\n`);
+    
+    for (const holding of otherHoldings) {
+      const coinDisplay = holding.coin.padEnd(8);
+      // Hiển thị giá trị gốc, không làm tròn
+      const amountStr = displayRawNumber(holding.total);
+      const valueStr = displayRawNumber(holding.valueUSDT);
+      
+      if (holding.coin === 'USDT') {
+        console.log(`   ${coinDisplay}: ${amountStr} USDT = ${valueStr} USDT`);
+      } else {
+        const priceStr = displayRawNumber(holding.price);
+        const frozenStr = parseFloat(holding.frozen || '0') > 0 ? ` (đóng băng: ${displayRawNumber(holding.frozen)})` : '';
+        console.log(`   ${coinDisplay}: ${amountStr} ${holding.coin} = ${valueStr} USDT | giá: ${priceStr} USDT${frozenStr}`);
+      }
     }
   }
   
@@ -742,4 +788,16 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseCandleData, formatTimestamp, formatNumber, displayCandleInfo };
+module.exports = {
+  parseCandleData,
+  formatTimestamp,
+  formatNumber,
+  displayCandleInfo,
+  getCoinPrice,
+  getSpotAccountInfo,
+  calculateTotalAssets,
+  displaySpotAccountInfo,
+  roundToScale,
+  sleep,
+  displayRawNumber,
+};
