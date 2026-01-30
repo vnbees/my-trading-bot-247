@@ -69,3 +69,5 @@ echo "🗑️ Xóa bot:"
 echo "   pm2 delete price-action-bot"
 echo ""
 
+
+

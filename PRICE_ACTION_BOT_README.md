@@ -334,3 +334,5 @@ MIT License - Tự do sử dụng và chỉnh sửa
 
 **Happy Price Action Trading! 📊🚀**
 
+
+

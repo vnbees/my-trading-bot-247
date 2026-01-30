@@ -292,6 +292,509 @@ class BitgetApi {
   }
 
   /**
+   * Lấy dữ liệu nến spot (candles/kline) từ Bitget Spot API
+   * @param {string} symbol - Symbol spot (ví dụ: BTCUSDT, PAXGUSDT)
+   * @param {string|number} granularity - Granularity (300 = 5 phút, 900 = 15 phút, 14400 = 4H, ...) hoặc string ("4h", "1min", ...)
+   * @param {number} limit - Số nến cần lấy (mặc định 200)
+   * @returns {Promise<Array>} - Mảng các nến [timestamp, open, high, low, close, volume]
+   */
+  async getSpotCandles(symbol, granularity = 300, limit = 200) {
+    // Chuyển đổi granularity từ số giây sang format string mà Spot API yêu cầu
+    // Format yêu cầu: 1min,3min,5min,15min,30min,1h,4h,6h,12h,1day,1week,1M
+    let granularityStr;
+    if (typeof granularity === 'string') {
+      // Nếu đã là string, giữ nguyên (nhưng validate)
+      granularityStr = granularity;
+    } else {
+      // Convert từ số giây sang string format
+      const granularityMap = {
+        60: '1min',
+        180: '3min',
+        300: '5min',
+        900: '15min',
+        1800: '30min',
+        3600: '1h',
+        14400: '4h',
+        21600: '6h',
+        43200: '12h',
+        86400: '1day',
+        604800: '1week',
+        2592000: '1M',
+      };
+      granularityStr = granularityMap[granularity] || granularity.toString();
+    }
+
+    const params = {
+      symbol: symbol.toUpperCase(),
+      granularity: granularityStr,
+      limit: limit.toString(),
+    };
+
+    // Spot API v2 là public endpoint, không cần authentication
+    // Thử endpoint v2 trước, nếu không được thì thử các endpoint khác
+    const endpoints = [
+      '/api/v2/spot/market/candles',      // Format v2 chuẩn (giống mix API)
+      '/api/v2/spot/public/candles',      // Format v2 với public prefix
+      '/api/spot/v2/market/candles',       // Format v2 với spot prefix trước
+      '/api/spot/v1/market/candles',       // fallback (sẽ fail nhưng để thử)
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.client.request({
+          method: 'GET',
+          url: endpoint,
+          params,
+        });
+
+        if (response.data && response.data.code && response.data.code !== '00000') {
+          // Nếu là lỗi v1 deprecated, tiếp tục thử endpoint khác
+          if (response.data.code === '30032' || response.data.msg?.includes('decommissioned')) {
+            lastError = new Error(`Bitget Spot API error ${response.data.code}: ${response.data.msg || 'Unknown'}`);
+            continue;
+          }
+          throw new Error(`Bitget Spot API error ${response.data.code}: ${response.data.msg || 'Unknown'}`);
+        }
+
+        // Bitget trả về array hoặc object với data
+        if (Array.isArray(response.data)) {
+          return response.data;
+        } else if (response.data && Array.isArray(response.data.data)) {
+          return response.data.data;
+        } else if (response.data && response.data.code === '00000' && Array.isArray(response.data.data)) {
+          return response.data.data;
+        }
+
+        throw new Error(`Spot API trả về dữ liệu không hợp lệ: ${JSON.stringify(response.data)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi v1 deprecated, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorMsg?.includes('decommissioned')) {
+            lastError = new Error(`Bitget Spot API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          // Nếu không phải lỗi deprecated, throw ngay
+          throw new Error(`Bitget Spot API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    // Nếu tất cả endpoints đều fail, throw lỗi cuối cùng
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể lấy dữ liệu từ bất kỳ endpoint nào');
+  }
+
+  /**
+   * Lấy thông tin tài sản spot từ Bitget Spot API
+   * @returns {Promise<Array>} - Mảng các asset với thông tin coin, available, frozen, total
+   */
+  async getSpotAssets() {
+    // Spot Assets API là private endpoint, cần authentication
+    const endpoints = [
+      '/api/spot/v1/account/assets',
+      '/api/v2/spot/account/assets',
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.request({
+          method: 'GET',
+          path: endpoint,
+          params: {},
+          body: {},
+        });
+
+        // Bitget trả về array hoặc object với data
+        if (Array.isArray(response)) {
+          return response;
+        } else if (response && Array.isArray(response.data)) {
+          return response.data;
+        } else if (response && response.code === '00000' && Array.isArray(response.data)) {
+          return response.data;
+        }
+
+        throw new Error(`Spot Assets API trả về dữ liệu không hợp lệ: ${JSON.stringify(response)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi v1 deprecated, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorMsg?.includes('decommissioned')) {
+            lastError = new Error(`Bitget Spot Assets API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          // Nếu không phải lỗi deprecated, throw ngay
+          throw new Error(`Bitget Spot Assets API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot Assets API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    // Nếu tất cả endpoints đều fail, throw lỗi cuối cùng
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể lấy dữ liệu từ bất kỳ endpoint nào');
+  }
+
+  /**
+   * Lấy giá ticker spot từ Bitget Spot API
+   * @param {string} symbol - Symbol spot (ví dụ: BTCUSDT, PAXGUSDT)
+   * @returns {Promise<Object>} - Thông tin ticker với giá last, bestAsk, bestBid
+   */
+  async getSpotTicker(symbol) {
+    const params = {
+      symbol: symbol.toUpperCase(),
+    };
+
+    // Spot Ticker API là public endpoint, không cần authentication
+    const endpoints = [
+      '/api/v2/spot/market/ticker',      // Format v2 chuẩn (giống candles)
+      '/api/spot/v1/market/ticker',      // Format v1
+      '/api/v2/spot/public/ticker',      // Format v2 với public prefix
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.client.request({
+          method: 'GET',
+          url: endpoint,
+          params,
+        });
+
+        if (response.data && response.data.code && response.data.code !== '00000') {
+          // Nếu là lỗi deprecated hoặc not found, tiếp tục thử endpoint khác
+          if (response.data.code === '30032' || response.data.code === '40404' || 
+              response.data.msg?.includes('decommissioned') || response.data.msg?.includes('NOT FOUND')) {
+            lastError = new Error(`Bitget Spot Ticker API error ${response.data.code}: ${response.data.msg || 'Unknown'}`);
+            continue;
+          }
+          throw new Error(`Bitget Spot Ticker API error ${response.data.code}: ${response.data.msg || 'Unknown'}`);
+        }
+
+        // Bitget trả về object với data
+        if (response.data && response.data.data) {
+          return response.data.data;
+        } else if (response.data && !response.data.code) {
+          return response.data;
+        }
+
+        throw new Error(`Spot Ticker API trả về dữ liệu không hợp lệ: ${JSON.stringify(response.data)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi deprecated hoặc not found, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorCode === '40404' || 
+              errorMsg?.includes('decommissioned') || errorMsg?.includes('NOT FOUND')) {
+            lastError = new Error(`Bitget Spot Ticker API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          throw new Error(`Bitget Spot Ticker API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot Ticker API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể lấy dữ liệu từ bất kỳ endpoint nào');
+  }
+
+  /**
+   * Đặt lệnh spot từ Bitget Spot API
+   * @param {Object} params - Tham số lệnh
+   * @param {string} params.symbol - Symbol spot (ví dụ: BTCUSDT, PAXGUSDT)
+   * @param {string} params.side - "buy" hoặc "sell"
+   * @param {string} params.orderType - "market" hoặc "limit"
+   * @param {string|number} params.size - Số lượng (cho market: coin cho sell, USDT cho buy)
+   * @param {string|number} [params.price] - Giá (chỉ cho limit order)
+   * @param {string} [params.clientOid] - Optional unique order ID
+   * @returns {Promise<Object>} - Kết quả đặt lệnh
+   */
+  async placeSpotOrder({ symbol, side, orderType = 'market', size, price, clientOid }) {
+    if (!symbol || !side || !size) {
+      throw new Error('symbol, side và size là bắt buộc');
+    }
+
+    const body = {
+      symbol: symbol.toUpperCase(),
+      side: side.toLowerCase(), // "buy" hoặc "sell"
+      orderType: orderType.toLowerCase(), // "market" hoặc "limit"
+      size: size.toString(),
+    };
+
+    // Thêm price nếu là limit order
+    if (orderType.toLowerCase() === 'limit') {
+      if (!price || Number(price) <= 0) {
+        throw new Error('Price is required for limit orders');
+      }
+      body.price = price.toString();
+    }
+
+    // Thêm clientOid nếu có
+    if (clientOid) {
+      body.clientOid = clientOid;
+    }
+
+    // Spot Order API là private endpoint, cần authentication
+    const endpoints = [
+      '/api/spot/v1/trade/orders',
+      '/api/v2/spot/trade/place-order',
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.request({
+          method: 'POST',
+          path: endpoint,
+          params: {},
+          body,
+        });
+
+        // Bitget trả về object với thông tin lệnh
+        if (response && response.orderId) {
+          return response;
+        } else if (response && response.data && response.data.orderId) {
+          return response.data;
+        } else if (response && response.code === '00000') {
+          return response.data || response;
+        }
+
+        throw new Error(`Spot Order API trả về dữ liệu không hợp lệ: ${JSON.stringify(response)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi deprecated hoặc not found, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorCode === '40404' || 
+              errorMsg?.includes('decommissioned') || errorMsg?.includes('NOT FOUND')) {
+            lastError = new Error(`Bitget Spot Order API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          // Nếu không phải lỗi deprecated, throw ngay
+          throw new Error(`Bitget Spot Order API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot Order API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    // Nếu tất cả endpoints đều fail, throw lỗi cuối cùng
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể đặt lệnh từ bất kỳ endpoint nào');
+  }
+
+  /**
+   * Lấy lịch sử lệnh spot từ Bitget Spot API
+   * @param {string} [symbol] - Symbol spot (ví dụ: BTCUSDT, PAXGUSDT) - optional
+   * @param {number} [limit=20] - Số lượng lệnh (mặc định 20, tối đa 100)
+   * @param {number} [startTime] - Timestamp bắt đầu (optional)
+   * @param {number} [endTime] - Timestamp kết thúc (optional)
+   * @returns {Promise<Array>} - Mảng các lệnh
+   */
+  async getSpotOrderHistory(symbol = null, limit = 20, startTime = null, endTime = null) {
+    const params = {
+      limit: Math.min(limit || 20, 100).toString(),
+    };
+
+    if (symbol) {
+      params.symbol = symbol.toUpperCase();
+    }
+
+    if (startTime) {
+      params.startTime = startTime.toString();
+    }
+
+    if (endTime) {
+      params.endTime = endTime.toString();
+    }
+
+    // Spot Order History API là private endpoint, cần authentication
+    const endpoints = [
+      '/api/spot/v1/trade/orderHistory',
+      '/api/v2/spot/trade/order-history',
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.request({
+          method: 'GET',
+          path: endpoint,
+          params,
+          body: {},
+        });
+
+        // Bitget trả về array hoặc object với data
+        if (Array.isArray(response)) {
+          return response;
+        } else if (response && Array.isArray(response.data)) {
+          return response.data;
+        } else if (response && response.code === '00000' && Array.isArray(response.data)) {
+          return response.data;
+        }
+
+        throw new Error(`Spot Order History API trả về dữ liệu không hợp lệ: ${JSON.stringify(response)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi deprecated hoặc not found, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorCode === '40404' || 
+              errorMsg?.includes('decommissioned') || errorMsg?.includes('NOT FOUND')) {
+            lastError = new Error(`Bitget Spot Order History API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          // Nếu không phải lỗi deprecated, throw ngay
+          throw new Error(`Bitget Spot Order History API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot Order History API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    // Nếu tất cả endpoints đều fail, throw lỗi cuối cùng
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể lấy lịch sử lệnh từ bất kỳ endpoint nào');
+  }
+
+  /**
+   * Lấy lịch sử lệnh đã fill spot từ Bitget Spot API
+   * @param {string} [symbol] - Symbol spot (ví dụ: BTCUSDT, PAXGUSDT) - optional
+   * @param {number} [limit=20] - Số lượng lệnh (mặc định 20, tối đa 100)
+   * @param {number} [startTime] - Timestamp bắt đầu (optional)
+   * @param {number} [endTime] - Timestamp kết thúc (optional)
+   * @returns {Promise<Array>} - Mảng các lệnh đã fill
+   */
+  async getSpotFills(symbol = null, limit = 20, startTime = null, endTime = null) {
+    const params = {
+      limit: Math.min(limit || 20, 100).toString(),
+    };
+
+    if (symbol) {
+      params.symbol = symbol.toUpperCase();
+    }
+
+    if (startTime) {
+      params.startTime = startTime.toString();
+    }
+
+    if (endTime) {
+      params.endTime = endTime.toString();
+    }
+
+    // Spot Fills API là private endpoint, cần authentication
+    const endpoints = [
+      '/api/spot/v1/trade/fills',
+      '/api/v2/spot/trade/fills',
+    ];
+
+    let lastError = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await this.request({
+          method: 'GET',
+          path: endpoint,
+          params,
+          body: {},
+        });
+
+        // Bitget trả về array hoặc object với data
+        if (Array.isArray(response)) {
+          return response;
+        } else if (response && Array.isArray(response.data)) {
+          return response.data;
+        } else if (response && response.code === '00000' && Array.isArray(response.data)) {
+          return response.data;
+        }
+
+        throw new Error(`Spot Fills API trả về dữ liệu không hợp lệ: ${JSON.stringify(response)}`);
+      } catch (err) {
+        if (err.response) {
+          const errorMsg = err.response.data?.msg || err.message;
+          const errorCode = err.response.data?.code || err.response.status;
+          
+          // Nếu là lỗi deprecated hoặc not found, tiếp tục thử endpoint khác
+          if (errorCode === '30032' || errorCode === '40404' || 
+              errorMsg?.includes('decommissioned') || errorMsg?.includes('NOT FOUND')) {
+            lastError = new Error(`Bitget Spot Fills API error [${errorCode}]: ${errorMsg}`);
+            continue;
+          }
+          
+          // Nếu không phải lỗi deprecated, throw ngay
+          throw new Error(`Bitget Spot Fills API error [${errorCode}]: ${errorMsg}`);
+        } else if (err.request) {
+          lastError = new Error(`Không thể kết nối đến Bitget Spot Fills API: ${err.message}`);
+          continue;
+        } else {
+          lastError = new Error(`Lỗi request: ${err.message}`);
+          continue;
+        }
+      }
+    }
+    
+    // Nếu tất cả endpoints đều fail, throw lỗi cuối cùng
+    if (lastError) {
+      throw lastError;
+    }
+    
+    throw new Error('Không thể lấy lịch sử fills từ bất kỳ endpoint nào');
+  }
+
+  /**
    * Lấy dữ liệu nến (candles/kline) từ Bitget
    * @param {string} symbol - Symbol (ví dụ: BTCUSDT_UMCBL)
    * @param {string|number} granularity - Granularity (300 = 5 phút, 900 = 15 phút, ...)
