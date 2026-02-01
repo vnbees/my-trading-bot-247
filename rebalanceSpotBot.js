@@ -197,27 +197,58 @@ class RebalanceSpotBot {
       console.log(`💰 Tổng tài sản: ${formatNumber(parseFloat(accountInfo.totalUSDT), 2)} USDT\n`);
 
       // 2. Rebalance BGB (2-5%)
-      await this.rebalanceBGB(accountInfo, assets);
+      try {
+        await this.rebalanceBGB(accountInfo, assets);
+      } catch (err) {
+        console.error(`❌ Lỗi khi rebalance BGB: ${err.message}`);
+        console.error(`   Chi tiết: ${err.stack}\n`);
+        // Tiếp tục chạy các bước sau
+      }
 
       // 3. Lấy lại thông tin tài khoản sau khi rebalance BGB
-      const assetsAfterBGB = await getSpotAccountInfo(this.api);
-      const accountInfoAfterBGB = await calculateTotalAssets(this.api, assetsAfterBGB);
+      let assetsAfterBGB;
+      let accountInfoAfterBGB;
+      try {
+        assetsAfterBGB = await getSpotAccountInfo(this.api);
+        accountInfoAfterBGB = await calculateTotalAssets(this.api, assetsAfterBGB);
+      } catch (err) {
+        console.error(`❌ Lỗi khi lấy thông tin tài khoản sau rebalance BGB: ${err.message}`);
+        // Nếu không lấy được, sử dụng thông tin cũ
+        assetsAfterBGB = assets;
+        accountInfoAfterBGB = accountInfo;
+      }
 
       // 4. Sử dụng USDT dư
-      await this.useExcessUSDT(accountInfoAfterBGB);
+      try {
+        await this.useExcessUSDT(accountInfoAfterBGB);
+      } catch (err) {
+        console.error(`❌ Lỗi khi sử dụng USDT dư: ${err.message}`);
+        console.error(`   Chi tiết: ${err.stack}\n`);
+        // Tiếp tục chạy các bước sau
+      }
 
       // 5. Lấy lại thông tin tài khoản sau khi sử dụng USDT dư
-      const assetsAfterUSDT = await getSpotAccountInfo(this.api);
-      const accountInfoAfterUSDT = await calculateTotalAssets(this.api, assetsAfterUSDT);
+      let assetsAfterUSDT;
+      let accountInfoAfterUSDT;
+      try {
+        assetsAfterUSDT = await getSpotAccountInfo(this.api);
+        accountInfoAfterUSDT = await calculateTotalAssets(this.api, assetsAfterUSDT);
+      } catch (err) {
+        console.error(`❌ Lỗi khi lấy thông tin tài khoản sau sử dụng USDT: ${err.message}`);
+        // Nếu không lấy được, sử dụng thông tin trước đó
+        assetsAfterUSDT = assetsAfterBGB || assets;
+        accountInfoAfterUSDT = accountInfoAfterBGB || accountInfo;
+      }
 
-      // 6. Trade BTC/PAXG dựa trên nến 4H
+      // 6. Trade BTC/PAXG dựa trên nến 4H (đã có try-catch bên trong)
       await this.tradeBTCAndPAXG(accountInfoAfterUSDT);
 
       console.log(`\n${'='.repeat(60)}`);
       console.log(`✅ HOÀN TẤT CHU KỲ REBALANCING`);
       console.log(`${'='.repeat(60)}\n`);
     } catch (err) {
-      console.error(`❌ Lỗi trong executeCycle: ${err.message}`);
+      console.error(`❌ Lỗi không mong đợi trong executeCycle: ${err.message}`);
+      console.error(`   Chi tiết: ${err.stack}\n`);
       throw err;
     }
   }
