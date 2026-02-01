@@ -565,11 +565,12 @@ class RebalanceSpotBot {
       const symbol = `${coin}USDT`;
       let roundedAmount;
 
-      // Làm tròn theo coin (BGB: 4, BTC: 8, PAXG: 4)
+      // Làm tròn theo coin (BGB: 4, BTC: 6, PAXG: 4)
+      // Bitget API yêu cầu BTC chỉ 6 chữ số thập phân
       if (coin === 'BGB') {
         roundedAmount = roundToScale(amount, 4);
       } else if (coin === 'BTC') {
-        roundedAmount = roundToScale(amount, 8);
+        roundedAmount = roundToScale(amount, 6);
       } else if (coin === 'PAXG') {
         roundedAmount = roundToScale(amount, 4);
       } else {
