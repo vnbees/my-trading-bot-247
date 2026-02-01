@@ -24,6 +24,7 @@ class RebalanceSpotBot {
       bgbMinPercent: config.bgbMinPercent || 2,
       bgbMaxPercent: config.bgbMaxPercent || 5,
       minChangePercent: config.minChangePercent || 0.5,
+      minDivergencePercent: config.minDivergencePercent || 0.5, // Chênh lệch tối thiểu giữa BTC và PAXG
       minOrderValue: config.minOrderValue || 1, // Tối thiểu 1 USDT
     };
   }
@@ -475,25 +476,31 @@ class RebalanceSpotBot {
       const paxgChange = Math.abs(parseFloat(paxgCandle.changePercent));
       const btcChangePercent = parseFloat(btcCandle.changePercent);
       const paxgChangePercent = parseFloat(paxgCandle.changePercent);
+      const divergence = Math.abs(btcChangePercent - paxgChangePercent); // Chênh lệch tuyệt đối giữa 2 coin
 
       console.log(`   BTC: ${btcChangePercent >= 0 ? '🟢' : '🔴'} ${btcChangePercent.toFixed(2)}% (biến động: ${btcChange.toFixed(2)}%)`);
-      console.log(`   PAXG: ${paxgChangePercent >= 0 ? '🟢' : '🔴'} ${paxgChangePercent.toFixed(2)}% (biến động: ${paxgChange.toFixed(2)}%)\n`);
+      console.log(`   PAXG: ${paxgChangePercent >= 0 ? '🟢' : '🔴'} ${paxgChangePercent.toFixed(2)}% (biến động: ${paxgChange.toFixed(2)}%)`);
+      console.log(`   Chênh lệch: ${divergence.toFixed(2)}%\n`);
 
-      // Kiểm tra điều kiện: cả 2 coin biến động >= 0.5% và có 1 xanh 1 đỏ
-      if (btcChange >= this.config.minChangePercent && paxgChange >= this.config.minChangePercent) {
+      // Kiểm tra điều kiện: có 1 xanh 1 đỏ và chênh lệch >= 0.5%
+      const hasOneGreenOneRed = (btcChangePercent > 0 && paxgChangePercent < 0) || (btcChangePercent < 0 && paxgChangePercent > 0);
+      
+      if (hasOneGreenOneRed && divergence >= this.config.minDivergencePercent) {
         if (btcChangePercent > 0 && paxgChangePercent < 0) {
           // BTC xanh, PAXG đỏ -> bán 1/10 BTC, mua PAXG
-          console.log(`   ✅ Điều kiện đạt: BTC xanh, PAXG đỏ\n`);
+          console.log(`   ✅ Điều kiện đạt: BTC xanh, PAXG đỏ (chênh lệch: ${divergence.toFixed(2)}%)\n`);
           await this.executeTrade('BTC', 'PAXG', accountInfo);
         } else if (btcChangePercent < 0 && paxgChangePercent > 0) {
           // PAXG xanh, BTC đỏ -> bán 1/10 PAXG, mua BTC
-          console.log(`   ✅ Điều kiện đạt: PAXG xanh, BTC đỏ\n`);
+          console.log(`   ✅ Điều kiện đạt: PAXG xanh, BTC đỏ (chênh lệch: ${divergence.toFixed(2)}%)\n`);
           await this.executeTrade('PAXG', 'BTC', accountInfo);
-        } else {
-          console.log(`   ℹ️  Cả 2 coin cùng màu hoặc không đáp ứng điều kiện, bỏ qua\n`);
         }
       } else {
-        console.log(`   ℹ️  Biến động không đủ (BTC: ${btcChange.toFixed(2)}%, PAXG: ${paxgChange.toFixed(2)}% < ${this.config.minChangePercent}%), bỏ qua\n`);
+        if (!hasOneGreenOneRed) {
+          console.log(`   ℹ️  Cả 2 coin cùng màu, bỏ qua\n`);
+        } else {
+          console.log(`   ℹ️  Chênh lệch không đủ (${divergence.toFixed(2)}% < ${this.config.minDivergencePercent}%), bỏ qua\n`);
+        }
       }
     } catch (err) {
       console.error(`   ❌ Lỗi khi trade BTC/PAXG: ${err.message}\n`);
