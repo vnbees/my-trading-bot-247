@@ -544,16 +544,66 @@ class RebalanceSpotBot {
       console.log(`   ⚠️  Số dư khả dụng không đủ, chỉ bán ${formatNumber(availableAmount, 8)} ${sellCoin}\n`);
       const actualSellValue = availableAmount * sellPrice;
       if (actualSellValue >= this.config.minOrderValue) {
+        // Lấy số dư USDT trước khi bán
+        const assetsBeforeSell = await getSpotAccountInfo(this.api);
+        const usdtBeforeSell = assetsBeforeSell.find((asset) => {
+          const coin = asset.coin || asset.currency || asset.asset;
+          return coin === 'USDT';
+        });
+        const usdtInitial = parseFloat(usdtBeforeSell?.available || usdtBeforeSell?.total || 0);
+
         await this.sellCoin(sellCoin, availableAmount);
-        await sleep(2000);
-        await this.buyCoin(buyCoin, actualSellValue);
-        await sleep(2000);
+        await sleep(3000); // Đợi lệnh fill hoàn toàn
+
+        // Lấy lại số dư USDT thực tế sau khi bán
+        const assetsAfterSell = await getSpotAccountInfo(this.api);
+        const usdtAfterSell = assetsAfterSell.find((asset) => {
+          const coin = asset.coin || asset.currency || asset.asset;
+          return coin === 'USDT';
+        });
+        const usdtAvailable = parseFloat(usdtAfterSell?.available || usdtAfterSell?.total || 0);
+        const usdtReceived = usdtAvailable - usdtInitial;
+
+        if (usdtReceived > 0 && usdtReceived >= this.config.minOrderValue) {
+          // Sử dụng 99% số USDT nhận được để tránh lỗi do làm tròn
+          const usdtToUse = usdtReceived * 0.99;
+          console.log(`   💰 USDT nhận được: ${formatNumber(usdtReceived, 2)} USDT (sẽ dùng ${formatNumber(usdtToUse, 2)} USDT)\n`);
+          await this.buyCoin(buyCoin, usdtToUse);
+          await sleep(2000);
+        } else {
+          console.log(`   ⚠️  USDT nhận được (${formatNumber(usdtReceived, 2)} USDT) không đủ để mua, bỏ qua\n`);
+        }
       }
     } else {
+      // Lấy số dư USDT trước khi bán
+      const assetsBeforeSell = await getSpotAccountInfo(this.api);
+      const usdtBeforeSell = assetsBeforeSell.find((asset) => {
+        const coin = asset.coin || asset.currency || asset.asset;
+        return coin === 'USDT';
+      });
+      const usdtInitial = parseFloat(usdtBeforeSell?.available || usdtBeforeSell?.total || 0);
+
       await this.sellCoin(sellCoin, sellAmount);
-      await sleep(2000);
-      await this.buyCoin(buyCoin, sellValue);
-      await sleep(2000);
+      await sleep(3000); // Đợi lệnh fill hoàn toàn
+
+      // Lấy lại số dư USDT thực tế sau khi bán
+      const assetsAfterSell = await getSpotAccountInfo(this.api);
+      const usdtAfterSell = assetsAfterSell.find((asset) => {
+        const coin = asset.coin || asset.currency || asset.asset;
+        return coin === 'USDT';
+      });
+      const usdtAvailable = parseFloat(usdtAfterSell?.available || usdtAfterSell?.total || 0);
+      const usdtReceived = usdtAvailable - usdtInitial;
+
+      if (usdtReceived > 0 && usdtReceived >= this.config.minOrderValue) {
+        // Sử dụng 99% số USDT nhận được để tránh lỗi do làm tròn
+        const usdtToUse = usdtReceived * 0.99;
+        console.log(`   💰 USDT nhận được: ${formatNumber(usdtReceived, 2)} USDT (sẽ dùng ${formatNumber(usdtToUse, 2)} USDT)\n`);
+        await this.buyCoin(buyCoin, usdtToUse);
+        await sleep(2000);
+      } else {
+        console.log(`   ⚠️  USDT nhận được (${formatNumber(usdtReceived, 2)} USDT) không đủ để mua, bỏ qua\n`);
+      }
     }
   }
 
