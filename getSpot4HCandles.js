@@ -141,30 +141,9 @@ async function getCoinPrice(api, coin) {
  */
 async function getSpotAccountInfo(api) {
   try {
-    // Debug: log thông tin credentials đang dùng (đã che bớt để an toàn)
-    try {
-      const key = api.apiKey || '';
-      const secret = api.apiSecret || '';
-      const pass = api.passphrase || '';
-      const maskedKey = key ? `${key.slice(0, 6)}***${key.slice(-4)}` : '(empty)';
-      const maskedSecret = secret ? `${secret.slice(0, 4)}***${secret.slice(-4)}` : '(empty)';
-      const maskedPass = pass ? `${pass.slice(0, 2)}***${pass.slice(-2)}` : '(empty)';
-      console.log('🔍 [DEBUG] Bitget credentials đang dùng:');
-      console.log(`    - apiKey: ${maskedKey}`);
-      console.log(`    - apiSecret: ${maskedSecret}`);
-      console.log(`    - passphrase: ${maskedPass}`);
-    } catch (_) {
-      // Không để debug log làm hỏng luồng chính
-    }
-
     const assets = await api.getSpotAssets();
-    console.log(`✅ [DEBUG] Lấy thông tin tài khoản spot thành công. Số lượng asset: ${Array.isArray(assets) ? assets.length : 0}`);
     return assets || [];
   } catch (err) {
-    // Log chi tiết lỗi raw (nếu có response từ Bitget)
-    if (err.response && err.response.data) {
-      console.error('❌ [DEBUG] Lỗi raw từ Bitget getSpotAssets:', JSON.stringify(err.response.data, null, 2));
-    }
     throw new Error(`Không thể lấy thông tin tài khoản spot: ${err.message}`);
   }
 }
