@@ -50,7 +50,7 @@ class RebalanceSpotBot {
      *
      * Bạn chỉ cần đổi giá trị mặc định bên dưới là true/false tuỳ ý.
      */
-    let isFirstRun = true;
+    let isFirstRun = false;
 
     while (true) {
       try {
