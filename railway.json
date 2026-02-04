@@ -5,7 +5,7 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "node startRebalanceSpotBot.js --key=${{ BITGET_API_KEY }} --secret=${{ BITGET_API_SECRET }} --passphrase=${{ BITGET_PASSPHRASE }} --interval=4",
+    "startCommand": "node startRebalanceSpotBot.js --key=bg_341563e7ffde3387dd8d85b38d039671 --secret=e3b3e24d8d80de7739b0fd5553a9a908ab1894a39710491bb0b0807c332991fe --passphrase=123abcABCD",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
