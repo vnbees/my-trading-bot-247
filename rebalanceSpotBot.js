@@ -43,19 +43,29 @@ class RebalanceSpotBot {
     console.log(`   - Min order value: ${this.config.minOrderValue} USDT`);
     console.log(`${'='.repeat(60)}\n`);
 
-    // Chạy theo interval (không chạy ngay lần đầu)
+    /**
+     * CỜ ĐIỀU KHIỂN LẦN CHẠY ĐẦU:
+     * - true  => CHẠY NGAY chu kỳ đầu tiên (không chờ nến), các chu kỳ sau mới chờ interval
+     * - false => CHỈ chạy sau khi chờ nến (hành vi "bình thường")
+     *
+     * Bạn chỉ cần đổi giá trị mặc định bên dưới là true/false tuỳ ý.
+     */
     let isFirstRun = true;
 
     while (true) {
       try {
-        // Đợi đến khi nến đóng cửa + 1 phút trước mỗi chu kỳ
-        await this.waitForNextCandle(this.config.intervalHours);
+        if (isFirstRun) {
+          console.log('⚡ Chạy chu kỳ đầu tiên ngay lập tức (không chờ nến)...\n');
+        } else {
+          // Từ chu kỳ thứ 2 trở đi mới chờ đến khi nến đóng cửa + 1 phút
+          await this.waitForNextCandle(this.config.intervalHours);
+        }
 
         // Thực thi một chu kỳ
         await this.executeCycle();
 
-        // Cờ giữ lại nếu sau này muốn custom logic cho lần chạy đầu
-        isFirstRun = true;
+        // Sau lần đầu tiên, luôn chờ theo interval
+        isFirstRun = false;
       } catch (err) {
         console.error(`\n❌ Lỗi trong chu kỳ: ${err.message}`);
         console.error(`   Chi tiết: ${err.stack}\n`);
