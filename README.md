@@ -105,3 +105,41 @@ All console output from the backtest (headers, trades, summary) is shown in Viet
    Lần tới SSH vào
 gcloud compute ssh ubuntu@bitget-bot --zone=us-west1-b rồi dùng pm2 status để xem bot.
 Vậy là bot chạy 24/7 trên VM free tier. Nếu bạn cần hướng dẫn upload code qua giao diện hoặc tạo script auto cài đặt, mình có thể soạn cho bạn.
+
+## 🚀 Deploy Bot 24/7
+
+Để chạy bot 24/7 trên cloud, xem hướng dẫn chi tiết tại: **[DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)**
+
+### Các nền tảng được hỗ trợ:
+- ⭐ **Railway** - Dễ nhất, miễn phí $5/tháng
+- ⭐ **VPS (DigitalOcean/Linode)** - Linh hoạt nhất, $5-6/tháng
+- **Render** - Miễn phí tier (có thể sleep)
+- **DigitalOcean App Platform** - $5+/tháng
+- **Google Cloud Run** - Pay-as-you-go
+- **Heroku** - $7+/tháng
+
+### Quick Start với VPS:
+```bash
+# SSH vào VPS
+ssh root@YOUR_VPS_IP
+
+# Chạy script tự động deploy
+cd ~/bot-bitget
+./deploy-vps.sh
+
+# Hoặc dùng PM2 thủ công
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup systemd
+```
+
+### Quick Start với Railway:
+1. Đăng ký tại [railway.app](https://railway.app)
+2. Deploy from GitHub repo
+3. Thêm Environment Variables:
+   - `BITGET_API_KEY`
+   - `BITGET_API_SECRET`
+   - `BITGET_PASSPHRASE`
+4. Deploy!
+
+Xem chi tiết tại [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md)

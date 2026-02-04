@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: rebalance-spot-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node startRebalanceSpotBot.js --key=$BITGET_API_KEY --secret=$BITGET_API_SECRET --passphrase=$BITGET_PASSPHRASE --interval=4
+    envVars:
+      - key: BITGET_API_KEY
+        sync: false
+      - key: BITGET_API_SECRET
+        sync: false
+      - key: BITGET_PASSPHRASE
+        sync: false

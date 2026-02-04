@@ -1,0 +1,23 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install --only=production
+
+# Copy application code
+COPY . .
+
+# Create entrypoint script
+RUN echo '#!/bin/sh' > /app/entrypoint.sh && \
+    echo 'exec node startRebalanceSpotBot.js --key="$BITGET_API_KEY" --secret="$BITGET_API_SECRET" --passphrase="$BITGET_PASSPHRASE" --interval=4' >> /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh
+
+# Expose port (not needed for bot, but some platforms require it)
+EXPOSE 3000
+
+# Run bot with environment variables
+ENTRYPOINT ["/app/entrypoint.sh"]
