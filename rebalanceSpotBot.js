@@ -44,7 +44,7 @@ class RebalanceSpotBot {
     console.log(`${'='.repeat(60)}\n`);
 
     // Chạy theo interval (không chạy ngay lần đầu)
-    let isFirstRun = false;
+    let isFirstRun = true;
 
     while (true) {
       try {
