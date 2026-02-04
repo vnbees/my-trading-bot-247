@@ -276,10 +276,35 @@ class RebalanceSpotBot {
       return;
     }
 
-    const valueBGB = parseFloat(bgbHolding.valueUSDT || '0');
+    let valueBGB = parseFloat(bgbHolding.valueUSDT || '0');
+    const amountBGB = parseFloat(bgbHolding.total || '0');
+
+    // Nếu vẫn có BGB nhưng valueUSDT = 0 (thường do không lấy được giá),
+    // thử lấy lại giá BGB trực tiếp từ API; nếu vẫn không lấy được giá thì
+    // bỏ qua rebalance BGB để tránh mua thêm BGB không cần thiết.
+    if (amountBGB > 0 && (isNaN(valueBGB) || valueBGB === 0)) {
+      try {
+        const fallbackPrice = await getCoinPrice(this.api, 'BGB');
+        if (fallbackPrice > 0) {
+          valueBGB = amountBGB * fallbackPrice;
+        } else {
+          console.log(
+            '   ⚠️ Không lấy được giá BGB (fallbackPrice = 0), bỏ qua rebalance BGB ở chu kỳ này để tránh mua thêm không cần thiết.\n'
+          );
+          return;
+        }
+      } catch (err) {
+        console.log(
+          `   ⚠️ Lỗi khi lấy lại giá BGB (${err.message}), bỏ qua rebalance BGB ở chu kỳ này để tránh mua thêm không cần thiết.\n`
+        );
+        return;
+      }
+    }
     const currentBGBPercent = totalUSDT > 0 ? (valueBGB / totalUSDT) * 100 : 0;
 
-    console.log(`   BGB hiện tại: ${formatNumber(valueBGB, 2)} USDT (${currentBGBPercent.toFixed(2)}%)`);
+    // Nếu giá trị BGB rất nhỏ, log với nhiều decimal hơn để tránh trông như 0
+    const bgbDisplayDecimals = valueBGB < 1 ? 4 : 2;
+    console.log(`   BGB hiện tại: ${formatNumber(valueBGB, bgbDisplayDecimals)} USDT (${currentBGBPercent.toFixed(2)}%)`);
     console.log(`   Target: ${this.config.bgbMinPercent}% - ${this.config.bgbMaxPercent}%\n`);
 
     // Nếu BGB > 5%, bán phần dư và chia vào PAXG/BTC
