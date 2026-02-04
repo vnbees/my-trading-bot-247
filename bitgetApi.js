@@ -19,6 +19,20 @@ class BitgetApi {
       timeout,
     });
     console.log(`[API] Khởi tạo Bitget API client (URL: ${this.baseURL})`);
+
+    // Debug: log credentials đang dùng (đã che bớt để an toàn)
+    try {
+      const maskedKey = `${apiKey.slice(0, 6)}***${apiKey.slice(-4)}`;
+      const maskedSecret = `${apiSecret.slice(0, 4)}***${apiSecret.slice(-4)}`;
+      const maskedPass = passphrase ? `${passphrase.slice(0, 2)}***${passphrase.slice(-2)}` : '(empty)';
+      console.log('[API DEBUG] Đang dùng Bitget credentials:');
+      console.log(`   - apiKey: ${maskedKey}`);
+      console.log(`   - apiSecret: ${maskedSecret}`);
+      console.log(`   - passphrase: ${maskedPass}`);
+    } catch (_) {
+      // Không để debug log làm hỏng constructor
+    }
+
     if (!passphrase) {
       console.warn('[API] ⚠️  Cảnh báo: Passphrase trống. Nếu API key của bạn yêu cầu passphrase, vui lòng thêm --passphrase=YOUR_PASSPHRASE');
     }
