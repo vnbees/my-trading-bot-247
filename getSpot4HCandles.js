@@ -156,6 +156,7 @@ async function getSpotAccountInfo(api) {
 async function calculateTotalAssets(api, assets) {
   const holdings = [];
   const importantCoins = ['USDT', 'BTC', 'PAXG', 'BGB']; // Chỉ tính tổng từ các coin này
+  const skipCoins = ['EDU', 'PHY']; // Bỏ qua các coin không có trading pair USDT
   let totalUSDT = 0;
   
   // Lọc các coin có số dư > 0 - giữ nguyên giá trị gốc
@@ -167,6 +168,12 @@ async function calculateTotalAssets(api, assets) {
   // Lấy giá cho từng coin
   for (const asset of coinsWithBalance) {
     const coin = asset.coin || asset.currency || asset.asset;
+    
+    // Bỏ qua các coin không có trading pair USDT
+    if (skipCoins.includes(coin)) {
+      continue;
+    }
+    
     // Giữ nguyên giá trị gốc từ API (string)
     const total = (asset.total || asset.available || '0').toString();
     const available = (asset.available || '0').toString();

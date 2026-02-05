@@ -8,6 +8,7 @@ const {
   sleep,
   formatNumber,
   formatTimestamp,
+  displayRawNumber,
 } = require('./getSpot4HCandles');
 
 /**
@@ -27,6 +28,26 @@ class RebalanceSpotBot {
       minDivergencePercent: config.minDivergencePercent || 0.5, // Chênh lệch tối thiểu giữa BTC và PAXG
       minOrderValue: config.minOrderValue || 1, // Tối thiểu 1 USDT
     };
+  }
+
+  /**
+   * Parse totalUSDT string an toàn, giữ precision và validate
+   * CRITICAL: Hàm này được dùng để parse totalUSDT trước khi dùng trong logic quyết định rebalance
+   */
+  safeParseTotalUSDT(totalUSDTStr) {
+    if (!totalUSDTStr || totalUSDTStr === '' || totalUSDTStr === '0') {
+      return 0;
+    }
+    
+    // Loại bỏ các ký tự không hợp lệ (giữ lại số, dấu chấm, dấu trừ)
+    const cleaned = String(totalUSDTStr).trim().replace(/[^0-9.-]/g, '');
+    const parsed = parseFloat(cleaned);
+    
+    if (isNaN(parsed) || parsed < 0) {
+      throw new Error(`totalUSDT không hợp lệ: "${totalUSDTStr}" (cleaned: "${cleaned}", parsed: ${parsed})`);
+    }
+    
+    return parsed;
   }
 
   /**
@@ -211,7 +232,46 @@ class RebalanceSpotBot {
       const assets = await getSpotAccountInfo(this.api);
       const accountInfo = await calculateTotalAssets(this.api, assets);
 
-      console.log(`💰 Tổng tài sản: ${formatNumber(parseFloat(accountInfo.totalUSDT), 2)} USDT\n`);
+      // Log chi tiết từng coin (QUAN TRỌNG để debug)
+      console.log(`📊 Chi tiết tài sản (dùng để tính tổng):`);
+      const importantHoldings = accountInfo.holdings.filter(h => h.isImportantCoin);
+      let manualTotal = 0;
+      for (const holding of importantHoldings) {
+        const amount = parseFloat(holding.total || '0');
+        const price = parseFloat(holding.price || '0');
+        const value = parseFloat(holding.valueUSDT || '0');
+        manualTotal += value;
+        
+        console.log(`   - ${holding.coin.padEnd(6)}: ${amount.toFixed(8)} coin × ${price.toFixed(2)} = ${value.toFixed(2)} USDT`);
+      }
+
+      console.log(`   → Tổng tính thủ công: ${manualTotal.toFixed(2)} USDT`);
+      console.log(`   → Tổng từ calculateTotalAssets: ${displayRawNumber(accountInfo.totalUSDT)} USDT`);
+
+      // Parse totalUSDT an toàn
+      let totalUSDT;
+      try {
+        totalUSDT = this.safeParseTotalUSDT(accountInfo.totalUSDT);
+      } catch (err) {
+        console.error(`   ❌ CRITICAL: Lỗi khi parse totalUSDT: ${err.message}`);
+        console.error(`   → Raw value: ${displayRawNumber(accountInfo.totalUSDT)}`);
+        throw new Error(`Không thể parse totalUSDT: ${err.message}`);
+      }
+
+      // Validate: So sánh tính thủ công vs API
+      if (Math.abs(manualTotal - totalUSDT) > 0.01) {
+        console.error(`   ⚠️ CẢNH BÁO: Chênh lệch giữa tính thủ công và API: ${Math.abs(manualTotal - totalUSDT).toFixed(2)} USDT`);
+        console.error(`   → Tính thủ công: ${manualTotal.toFixed(2)} USDT`);
+        console.error(`   → Từ API: ${totalUSDT.toFixed(2)} USDT`);
+      }
+
+      // Hiển thị tổng với cả raw và formatted
+      console.log(`💰 Tổng tài sản (raw): ${displayRawNumber(accountInfo.totalUSDT)} USDT`);
+      console.log(`💰 Tổng tài sản (parsed): ${totalUSDT.toFixed(2)} USDT`);
+      console.log(`💰 Tổng tài sản (formatted): ${formatNumber(totalUSDT, 2)} USDT\n`);
+
+      // Lưu totalUSDT đã parse vào accountInfo để dùng sau
+      accountInfo.totalUSDTParsed = totalUSDT;
 
       // 2. Rebalance BGB (2-5%)
       try {
@@ -228,6 +288,13 @@ class RebalanceSpotBot {
       try {
         assetsAfterBGB = await getSpotAccountInfo(this.api);
         accountInfoAfterBGB = await calculateTotalAssets(this.api, assetsAfterBGB);
+        // Parse và validate totalUSDT
+        try {
+          accountInfoAfterBGB.totalUSDTParsed = this.safeParseTotalUSDT(accountInfoAfterBGB.totalUSDT);
+        } catch (err) {
+          console.error(`   ⚠️ CẢNH BÁO: Không thể parse totalUSDT sau rebalance BGB: ${err.message}`);
+          // Vẫn tiếp tục nhưng log warning
+        }
       } catch (err) {
         console.error(`❌ Lỗi khi lấy thông tin tài khoản sau rebalance BGB: ${err.message}`);
         // Nếu không lấy được, sử dụng thông tin cũ
@@ -250,6 +317,13 @@ class RebalanceSpotBot {
       try {
         assetsAfterUSDT = await getSpotAccountInfo(this.api);
         accountInfoAfterUSDT = await calculateTotalAssets(this.api, assetsAfterUSDT);
+        // Parse và validate totalUSDT
+        try {
+          accountInfoAfterUSDT.totalUSDTParsed = this.safeParseTotalUSDT(accountInfoAfterUSDT.totalUSDT);
+        } catch (err) {
+          console.error(`   ⚠️ CẢNH BÁO: Không thể parse totalUSDT sau sử dụng USDT: ${err.message}`);
+          // Vẫn tiếp tục nhưng log warning
+        }
       } catch (err) {
         console.error(`❌ Lỗi khi lấy thông tin tài khoản sau sử dụng USDT: ${err.message}`);
         // Nếu không lấy được, sử dụng thông tin trước đó
@@ -279,7 +353,30 @@ class RebalanceSpotBot {
     console.log(`${'─'.repeat(60)}`);
 
     const bgbHolding = accountInfo.holdings.find((h) => h.coin === 'BGB');
-    const totalUSDT = parseFloat(accountInfo.totalUSDT || '0');
+    
+    // CRITICAL: Parse và validate totalUSDT TRƯỚC KHI DÙNG trong logic quyết định
+    let totalUSDT;
+    try {
+      // Ưu tiên dùng giá trị đã parse từ executeCycle (nếu có)
+      if (accountInfo.totalUSDTParsed !== undefined) {
+        totalUSDT = accountInfo.totalUSDTParsed;
+      } else {
+        totalUSDT = this.safeParseTotalUSDT(accountInfo.totalUSDT);
+      }
+    } catch (err) {
+      console.error(`   ❌ CRITICAL: totalUSDT không hợp lệ (${err.message}), bỏ qua rebalance BGB để tránh quyết định sai`);
+      return;
+    }
+
+    // Validation nghiêm ngặt
+    if (totalUSDT <= 0) {
+      console.error(`   ❌ CRITICAL: totalUSDT không hợp lệ (${totalUSDT}), bỏ qua rebalance BGB để tránh quyết định sai`);
+      return;
+    }
+    
+    if (totalUSDT < 10) {
+      console.warn(`   ⚠️ CẢNH BÁO: totalUSDT rất nhỏ (${totalUSDT.toFixed(2)} USDT), có thể là lỗi`);
+    }
 
     if (!bgbHolding) {
       console.log(`   ℹ️  Không có BGB trong danh mục\n`);
