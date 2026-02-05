@@ -187,6 +187,17 @@ async function calculateTotalAssets(api, assets) {
       valueUSDT = total; // Giữ nguyên string
     } else {
       price = await getCoinPrice(api, coin);
+      
+      // Nếu lấy giá thất bại (price = 0) và là coin quan trọng (BGB, BTC, PAXG), thử lại 1 lần
+      if (price === 0 && importantCoins.includes(coin)) {
+        console.log(`   ⚠️  Lần đầu không lấy được giá ${coin}, thử lại...`);
+        await sleep(1000); // Đợi 1 giây trước khi thử lại
+        price = await getCoinPrice(api, coin);
+        if (price > 0) {
+          console.log(`   ✅ Đã lấy được giá ${coin} sau lần thử lại: ${price.toFixed(2)} USDT`);
+        }
+      }
+      
       // Tính valueUSDT nhưng giữ nguyên precision
       const totalNum = parseFloat(total);
       const valueNum = totalNum * price;
